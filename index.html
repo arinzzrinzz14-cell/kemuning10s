@@ -568,6 +568,14 @@
                 };
             },
 
+            isMatchUnresolved(match) {
+                if (!match) return true;
+                const mNum = Number(match.matchNumberRaw);
+                const isKnockout = (mNum >= 13 && mNum <= 19) || this.isKnockoutRound(match.roundName || match.stage, mNum);
+                const missingTeams = !match.homeTeamId || !match.awayTeamId;
+                return missingTeams && (isKnockout || missingTeams);
+            },
+
             getMatch(matchId) {
                 return this.matches.find(m => m.id === matchId) || this.matches[0] || null;
             },
@@ -585,6 +593,12 @@
             // Only sends valid public.result_status enum values ('draft', 'confirmed', 'official', 'cancelled')
             async persistMatchStateToSupabase(match, options = {}) {
                 if (!SupabaseConfig.client || !match || !match.id) return false;
+                if (this.isMatchUnresolved(match)) {
+                    if (!options.silent) {
+                        UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
+                    }
+                    return false;
+                }
                 const db = SupabaseConfig.client;
                 const dbStatus = this.mapUiStatusToDbStatus(match.status, match.period);
                 const resultStatus = match.officialConfirmed
@@ -776,6 +790,10 @@
                 }
                 const match = this.getMatch(matchId);
                 if (!match) return;
+                if (this.isMatchUnresolved(match)) {
+                    UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
+                    return;
+                }
                 if (match.officialConfirmed) {
                     UI.toast("Match is already officially confirmed and locked.", "warning");
                     return;
@@ -819,12 +837,12 @@
                 }
                 const match = this.getMatch(matchId);
                 if (!match) return;
-                if (match.officialConfirmed) {
-                    UI.toast("Cannot modify events after official result confirmation.", "error");
+                if (this.isMatchUnresolved(match)) {
+                    UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
                     return;
                 }
-                if (!match.homeTeamId || !match.awayTeamId) {
-                    UI.toast("Match teams are still Pending Qualification. Assign qualified teams before scoring.", "warning");
+                if (match.officialConfirmed) {
+                    UI.toast("Cannot modify events after official result confirmation.", "error");
                     return;
                 }
 
@@ -875,8 +893,8 @@
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) return;
                 const match = this.getMatch(matchId);
                 if (!match) return;
-                if (!match.homeTeamId || !match.awayTeamId) {
-                    UI.toast("Match teams are still Pending Qualification. Assign qualified teams before scoring.", "warning");
+                if (this.isMatchUnresolved(match)) {
+                    UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
                     return;
                 }
                 if (match.officialConfirmed && !AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) {
@@ -896,7 +914,7 @@
             async undoLastEvent(matchId) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) return;
                 const match = this.getMatch(matchId);
-                if (!match || match.officialConfirmed || match.events.length === 0) return;
+                if (!match || this.isMatchUnresolved(match) || match.officialConfirmed || match.events.length === 0) return;
 
                 const last = match.events.pop();
                 if (last.side === "HOME") {
@@ -913,8 +931,8 @@
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) return;
                 const match = this.getMatch(matchId);
                 if (!match) return;
-                if (!match.homeTeamId || !match.awayTeamId) {
-                    UI.toast("Cannot confirm result while match participants are still Pending Qualification.", "warning");
+                if (this.isMatchUnresolved(match)) {
+                    UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
                     return;
                 }
                 const desc = this.getKnockoutDescriptor(match);
@@ -1756,6 +1774,11 @@
                     return;
                 }
                 if (matchId) {
+                    const targetMatch = MatchEngine.getMatch(matchId);
+                    if (targetMatch && MatchEngine.isMatchUnresolved(targetMatch)) {
+                        UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
+                        return;
+                    }
                     MatchEngine.selectedMatchId = matchId;
                 }
                 this.activeTab = "live_console";
@@ -2313,10 +2336,16 @@
                                                         </td>
                                                         <td class="p-3 text-right">
                                                             <div class="inline-flex flex-wrap justify-end gap-1.5">
-                                                                <button type="button" onclick="DashboardViews.openScorekeeperConsole('${m.id}')"
-                                                                    class="px-2.5 py-1 rounded-lg bg-pitch-600 hover:bg-pitch-500 text-white text-xs font-semibold">
-                                                                    Score Console
-                                                                </button>
+                                                                ${MatchEngine.isMatchUnresolved(m) ? `
+                                                                    <span class="px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-700 border border-amber-500/30 text-[11px] font-bold">
+                                                                        Pending Qualification
+                                                                    </span>
+                                                                ` : `
+                                                                    <button type="button" onclick="DashboardViews.openScorekeeperConsole('${m.id}')"
+                                                                        class="px-2.5 py-1 rounded-lg bg-pitch-600 hover:bg-pitch-500 text-white text-xs font-semibold">
+                                                                        Score Console
+                                                                    </button>
+                                                                `}
                                                                 <button type="button" onclick="DashboardViews.openEditBracketTeamsModal('${m.id}')"
                                                                     class="px-2.5 py-1 rounded-lg bg-navy-800 hover:bg-navy-700 text-slate-200 text-xs font-semibold">
                                                                     Set Teams
@@ -2443,8 +2472,14 @@
                     return `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">Tiada perlawanan ditemui untuk edisi ${edYear}.</div>`;
                 }
 
-                const activeMatch = assignedMatches.find(m => m.id === MatchEngine.selectedMatchId) || assignedMatches[0];
+                const resolvedMatches = assignedMatches.filter(m => !MatchEngine.isMatchUnresolved(m));
+                const requestedMatch = assignedMatches.find(m => m.id === MatchEngine.selectedMatchId) || null;
+                const activeMatch = (requestedMatch && !MatchEngine.isMatchUnresolved(requestedMatch))
+                    ? requestedMatch
+                    : (resolvedMatches[0] || assignedMatches[0]);
                 MatchEngine.selectedMatchId = activeMatch.id;
+                const isUnresolved = MatchEngine.isMatchUnresolved(activeMatch);
+                const controlsLocked = activeMatch.officialConfirmed || isUnresolved;
                 const activeDesc = MatchEngine.getKnockoutDescriptor(activeMatch);
                 const home = activeDesc.homeTeam;
                 const away = activeDesc.awayTeam;
@@ -2467,24 +2502,32 @@
                                     const d = MatchEngine.getKnockoutDescriptor(m);
                                     const h = d.homeTeam;
                                     const a = d.awayTeam;
+                                    const unresolvedItem = MatchEngine.isMatchUnresolved(m);
                                     const isSelected = m.id === activeMatch.id;
                                     return `
-                                        <button onclick="MatchEngine.selectedMatchId='${m.id}'; App.renderCurrentPage()"
-                                            class="text-left p-3.5 rounded-xl border transition ${isSelected ? 'bg-pitch-900/20 border-pitch-500 shadow-md' : 'bg-navy-950/70 border-white/10 hover:border-pitch-400'}">
+                                        <button type="button" onclick="${unresolvedItem ? `UI.toast('Pending Qualification – Waiting for qualified teams.', 'warning')` : `MatchEngine.selectedMatchId='${m.id}'; App.renderCurrentPage()`}"
+                                            class="text-left p-3.5 rounded-xl border transition ${unresolvedItem ? 'opacity-75 bg-amber-500/5 border-amber-500/30 cursor-not-allowed' : isSelected ? 'bg-pitch-900/20 border-pitch-500 shadow-md' : 'bg-navy-950/70 border-white/10 hover:border-pitch-400'}">
                                             <div class="flex items-center justify-between text-xs mb-1">
                                                 <span class="font-bold text-pitch-400">${m.matchNo} • ${m.pitch}</span>
-                                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${m.status === 'LIVE' ? 'bg-red-500/20 text-red-700' : m.status === 'FINAL' ? 'bg-emerald-500/20 text-emerald-700' : 'bg-slate-200 text-slate-700'}">${m.status}</span>
+                                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${unresolvedItem ? 'bg-amber-500/20 text-amber-700' : m.status === 'LIVE' ? 'bg-red-500/20 text-red-700' : m.status === 'FINAL' ? 'bg-emerald-500/20 text-emerald-700' : 'bg-slate-200 text-slate-700'}">${unresolvedItem ? 'PENDING' : m.status}</span>
                                             </div>
                                             <div class="font-bold text-white text-sm flex items-center justify-between">
                                                 <span class="truncate pr-2">${d.isPendingQualification ? `${h.name} vs ${a.name}` : `${h.short} vs ${a.short}`}</span>
                                                 <span class="font-sport text-lg text-gold-400 shrink-0">${m.homeScore} - ${m.awayScore}</span>
                                             </div>
-                                            <div class="text-[11px] text-slate-400 truncate mt-0.5">${d.isPendingQualification ? d.pendingBanner : `${m.category} • ${m.stage}`}</div>
+                                            <div class="text-[11px] ${unresolvedItem ? 'text-amber-700 font-semibold' : 'text-slate-400'} truncate mt-0.5">${unresolvedItem ? 'Pending Qualification – Waiting for qualified teams.' : `${m.category} • ${m.stage}`}</div>
                                         </button>
                                     `;
                                 }).join("")}
                             </div>
                         </div>
+
+                        ${isUnresolved ? `
+                            <div class="p-4 rounded-2xl bg-amber-500/15 border border-amber-500/40 text-amber-900 flex items-center gap-3 text-sm font-bold">
+                                <i class="fa-solid fa-hourglass-half text-amber-600 text-lg"></i>
+                                <span>Pending Qualification – Waiting for qualified teams.</span>
+                            </div>
+                        ` : ""}
 
                         <!-- PROFESSIONAL LIVE MATCH CONTROL SCREEN -->
                         <div class="sport-card rounded-2xl overflow-hidden border border-pitch-500/30">
@@ -2528,7 +2571,7 @@
                                         <!-- Timer Control Buttons -->
                                         <div class="flex flex-wrap justify-center gap-2 mt-4">
                                             ${!activeMatch.timerRunning ? `
-                                                <button onclick="MatchEngine.controlTimer('${activeMatch.id}', 'START')" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                                <button onclick="MatchEngine.controlTimer('${activeMatch.id}', 'START')" ${controlsLocked ? 'disabled' : ''}
                                                     class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1.5 shadow">
                                                     <i class="fa-solid fa-play"></i> ${activeMatch.elapsedSeconds > 0 ? 'Resume' : 'Start Clock'}
                                                 </button>
@@ -2538,11 +2581,11 @@
                                                     <i class="fa-solid fa-pause"></i> Pause
                                                 </button>
                                             `}
-                                            <button onclick="MatchEngine.controlTimer('${activeMatch.id}', 'HALF_TIME')" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.controlTimer('${activeMatch.id}', 'HALF_TIME')" ${controlsLocked ? 'disabled' : ''}
                                                 class="px-3 py-2 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-slate-200 border border-white/15 font-semibold text-xs">
                                                 Half-Time
                                             </button>
-                                            <button onclick="MatchEngine.controlTimer('${activeMatch.id}', 'SECOND_HALF')" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.controlTimer('${activeMatch.id}', 'SECOND_HALF')" ${controlsLocked ? 'disabled' : ''}
                                                 class="px-3 py-2 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-slate-200 border border-white/15 font-semibold text-xs">
                                                 2nd Half
                                             </button>
@@ -2566,15 +2609,15 @@
                                         <p class="text-xs text-slate-400">Setiap skor disimpan terus ke jadual <code>match_results</code> di Supabase.</p>
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
-                                        <input type="text" id="sk-player-input" placeholder="Player Name / # (e.g. Hafiz #10)"
-                                            class="bg-navy-950 border border-white/15 rounded-xl px-3.5 py-2 text-sm text-white w-full sm:w-56 focus:border-pitch-500 focus:outline-none">
+                                        <input type="text" id="sk-player-input" ${controlsLocked ? 'disabled' : ''} placeholder="Player Name / # (e.g. Hafiz #10)"
+                                            class="bg-navy-950 border border-white/15 rounded-xl px-3.5 py-2 text-sm text-white w-full sm:w-56 disabled:opacity-40 focus:border-pitch-500 focus:outline-none">
                                         <div class="flex items-center gap-1.5 bg-navy-800 px-2.5 py-1.5 rounded-xl">
                                             <span class="text-[11px] font-bold">Direct:</span>
-                                            <input type="number" id="direct-home-score" min="0" value="${activeMatch.homeScore}" class="w-12 px-1.5 py-1 rounded text-xs font-bold text-center">
+                                            <input type="number" id="direct-home-score" min="0" value="${activeMatch.homeScore}" ${controlsLocked ? 'disabled' : ''} class="w-12 px-1.5 py-1 rounded text-xs font-bold text-center disabled:opacity-40">
                                             <span>-</span>
-                                            <input type="number" id="direct-away-score" min="0" value="${activeMatch.awayScore}" class="w-12 px-1.5 py-1 rounded text-xs font-bold text-center">
-                                            <button onclick="MatchEngine.setDirectScore('${activeMatch.id}', document.getElementById('direct-home-score').value, document.getElementById('direct-away-score').value)"
-                                                class="px-2.5 py-1 rounded-lg bg-pitch-600 text-white text-xs font-bold">Save</button>
+                                            <input type="number" id="direct-away-score" min="0" value="${activeMatch.awayScore}" ${controlsLocked ? 'disabled' : ''} class="w-12 px-1.5 py-1 rounded text-xs font-bold text-center disabled:opacity-40">
+                                            <button onclick="MatchEngine.setDirectScore('${activeMatch.id}', document.getElementById('direct-home-score').value, document.getElementById('direct-away-score').value)" ${controlsLocked ? 'disabled' : ''}
+                                                class="px-2.5 py-1 rounded-lg bg-pitch-600 disabled:opacity-40 text-white text-xs font-bold">Save</button>
                                         </div>
                                     </div>
                                 </div>
@@ -2584,27 +2627,27 @@
                                     <div class="p-4 rounded-2xl bg-navy-950/80 border border-pitch-500/25">
                                         <div class="text-xs font-bold text-pitch-400 uppercase mb-3">${home.name} — Event Buttons</div>
                                         <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'TRY', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'TRY', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-pitch-700 hover:bg-pitch-600 disabled:opacity-40 text-white font-bold text-xs text-center transition">
                                                 TRY <span class="block text-gold-300 font-sport text-base">+5 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'CONVERSION', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'CONVERSION', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-white font-bold text-xs text-center border border-white/10 transition">
                                                 CONVERSION <span class="block text-pitch-400 font-sport text-base">+2 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'PENALTY', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'PENALTY', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-white font-bold text-xs text-center border border-white/10 transition">
                                                 PENALTY <span class="block text-pitch-400 font-sport text-base">+3 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'DROP_GOAL', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'DROP_GOAL', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-white font-bold text-xs text-center border border-white/10 transition">
                                                 DROP GOAL <span class="block text-pitch-400 font-sport text-base">+3 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'YELLOW_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'YELLOW_CARD', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-yellow-500/20 hover:bg-yellow-500/30 disabled:opacity-40 text-yellow-700 border border-yellow-500/40 font-bold text-xs text-center transition">
                                                 <i class="fa-solid fa-square text-yellow-500 mr-1"></i> YELLOW CARD
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'RED_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'HOME', 'RED_CARD', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-red-500/20 hover:bg-red-500/30 disabled:opacity-40 text-red-700 border border-red-500/40 font-bold text-xs text-center transition">
                                                 <i class="fa-solid fa-square text-red-600 mr-1"></i> RED CARD
                                             </button>
@@ -2615,27 +2658,27 @@
                                     <div class="p-4 rounded-2xl bg-navy-950/80 border border-sky-500/25">
                                         <div class="text-xs font-bold text-sky-400 uppercase mb-3">${away.name} — Event Buttons</div>
                                         <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'TRY', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'TRY', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-white font-bold text-xs text-center transition">
                                                 TRY <span class="block text-gold-300 font-sport text-base">+5 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'CONVERSION', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'CONVERSION', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-white font-bold text-xs text-center border border-white/10 transition">
                                                 CONVERSION <span class="block text-sky-400 font-sport text-base">+2 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'PENALTY', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'PENALTY', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-white font-bold text-xs text-center border border-white/10 transition">
                                                 PENALTY <span class="block text-sky-400 font-sport text-base">+3 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'DROP_GOAL', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'DROP_GOAL', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-white font-bold text-xs text-center border border-white/10 transition">
                                                 DROP GOAL <span class="block text-sky-400 font-sport text-base">+3 PTS</span>
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'YELLOW_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'YELLOW_CARD', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-yellow-500/20 hover:bg-yellow-500/30 disabled:opacity-40 text-yellow-700 border border-yellow-500/40 font-bold text-xs text-center transition">
                                                 <i class="fa-solid fa-square text-yellow-500 mr-1"></i> YELLOW CARD
                                             </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'RED_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'RED_CARD', document.getElementById('sk-player-input').value)" ${controlsLocked ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-red-500/20 hover:bg-red-500/30 disabled:opacity-40 text-red-700 border border-red-500/40 font-bold text-xs text-center transition">
                                                 <i class="fa-solid fa-square text-red-600 mr-1"></i> RED CARD
                                             </button>
@@ -2646,7 +2689,7 @@
                                 <!-- Bottom Action Bar: Undo, Reset Match & Confirm Official Result -->
                                 <div class="mt-6 pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-4">
                                     <div class="flex flex-wrap items-center gap-2">
-                                        <button onclick="MatchEngine.undoLastEvent('${activeMatch.id}')" ${activeMatch.officialConfirmed || activeMatch.events.length === 0 ? 'disabled' : ''}
+                                        <button onclick="MatchEngine.undoLastEvent('${activeMatch.id}')" ${controlsLocked || activeMatch.events.length === 0 ? 'disabled' : ''}
                                             class="px-4 py-2.5 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-slate-200 border border-white/15 text-xs font-semibold">
                                             <i class="fa-solid fa-rotate-left mr-1.5"></i> Undo Last Event
                                         </button>
@@ -2659,10 +2702,10 @@
                                         ` : ''}
                                     </div>
 
-                                    <button onclick="MatchEngine.confirmOfficialResult('${activeMatch.id}')" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                    <button onclick="MatchEngine.confirmOfficialResult('${activeMatch.id}')" ${controlsLocked ? 'disabled' : ''}
                                         class="px-6 py-3 rounded-xl bg-gradient-to-r from-pitch-600 to-emerald-600 hover:from-pitch-500 hover:to-emerald-500 disabled:opacity-40 text-white font-bold text-sm shadow-lg flex items-center gap-2">
                                         <i class="fa-solid fa-circle-check"></i>
-                                        ${activeMatch.officialConfirmed ? 'Official Result Confirmed' : 'Confirm & Publish Official Result'}
+                                        ${isUnresolved ? 'Pending Qualification – Waiting for qualified teams' : activeMatch.officialConfirmed ? 'Official Result Confirmed' : 'Confirm & Publish Official Result'}
                                     </button>
                                 </div>
 
