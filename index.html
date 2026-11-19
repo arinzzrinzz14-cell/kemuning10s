@@ -652,6 +652,114 @@
                 return true;
             },
 
+            // Safely reset a single match back to Scheduled/Upcoming without deleting the fixture or scorekeeper assignment
+            confirmResetMatch(matchId) {
+                if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) {
+                    UI.toast("Access Denied: Only Admin or Super Admin can reset matches.", "error");
+                    return;
+                }
+                const match = this.getMatch(matchId);
+                if (!match) return;
+                const desc = this.getKnockoutDescriptor(match);
+
+                UI.showModal(
+                    `Confirm Reset Match (${match.matchNo})`,
+                    `<div class="space-y-3 text-xs">
+                        <div class="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-800 font-semibold">
+                            <i class="fa-solid fa-triangle-exclamation mr-1"></i> This will clear the test score and official result for <strong>${match.matchNo}</strong> only, returning its status to <strong>Upcoming (Scheduled)</strong>.
+                        </div>
+                        <div class="bg-navy-800 p-3.5 rounded-xl text-center">
+                            <div class="font-bold text-sm text-[#102C50]">${desc.homeTeam.name} <span class="text-slate-400 mx-1">(${match.homeScore} - ${match.awayScore})</span> ${desc.awayTeam.name}</div>
+                            <div class="text-[11px] text-slate-500 mt-1">${match.category} • ${match.stage} • ${match.pitch}</div>
+                        </div>
+                        <p class="text-slate-600">The fixture, tournament, teams, category, and scorekeeper assignment will remain intact. Standings and knockout slots will refresh automatically.</p>
+                    </div>`,
+                    [
+                        { label: "Cancel", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() },
+                        {
+                            label: "Reset Match to Upcoming",
+                            icon: "fa-rotate-left",
+                            style: "orange",
+                            onClick: async () => {
+                                UI.closeModal();
+                                await MatchEngine.executeResetMatch(match.id);
+                            }
+                        }
+                    ]
+                );
+            },
+
+            async executeResetMatch(matchId) {
+                if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) return;
+                if (!SupabaseConfig.client) return;
+                const match = this.getMatch(matchId);
+                if (!match) return;
+
+                const db = SupabaseConfig.client;
+
+                // 1. Reset match status to 'scheduled' in `matches` without altering teams, category, or scorekeeper_id
+                const { error: matchErr } = await db
+                    .from("matches")
+                    .update({ status: "scheduled" })
+                    .eq("id", match.id);
+
+                if (matchErr) {
+                    console.error("Failed to reset matches row:", matchErr);
+                    UI.toast("Failed to reset match status in Supabase: " + matchErr.message, "error");
+                    return;
+                }
+
+                // 2. Check existing `match_results` row and remove via DELETE;
+                // if DELETE is blocked by RLS (returns error or 0 deleted rows), fall back to UPDATE (0-0 draft)
+                const { data: existingResult } = await db
+                    .from("match_results")
+                    .select("match_id")
+                    .eq("match_id", match.id)
+                    .limit(1);
+
+                if (existingResult && existingResult.length > 0) {
+                    const { data: deletedRows, error: delErr } = await db
+                        .from("match_results")
+                        .delete()
+                        .eq("match_id", match.id)
+                        .select("match_id");
+
+                    if (delErr || !deletedRows || deletedRows.length === 0) {
+                        const { error: updErr } = await db
+                            .from("match_results")
+                            .update({
+                                home_score: 0,
+                                away_score: 0,
+                                status: "draft",
+                                confirmed_at: null,
+                                official_at: null
+                            })
+                            .eq("match_id", match.id);
+
+                        if (updErr) {
+                            UI.toast("Failed to clear match_results record: " + updErr.message, "error");
+                            return;
+                        }
+                    }
+                }
+
+                // 3. Reset local match state strictly for this matchId
+                match.status = "SCHEDULED";
+                match.period = "FIRST_HALF";
+                match.elapsedSeconds = 0;
+                match.timerRunning = false;
+                match.homeScore = 0;
+                match.awayScore = 0;
+                match.officialConfirmed = false;
+                match.events = [];
+
+                // 4. Reload tournament data & reverse/recalculate standings and downstream knockout progression
+                await SupabaseData.loadTournamentByYear(match.edition);
+                AuthManager.logAudit(`Reset Match ${match.matchNo} (${match.id}) back to SCHEDULED / Upcoming`);
+                UI.toast(`Match ${match.matchNo} has been reset to Upcoming (0 - 0).`, "success");
+                App.renderCurrentPage();
+            },
+
             async controlTimer(matchId, action) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) {
                     UI.toast("Access Denied: Official Scorekeeper or Admin role required.", "error");
@@ -979,9 +1087,9 @@
                     const pool13Ready = this.areAllPoolMatchesFinal(edYear, cat13);
                     const pA = pool13Ready ? getPoolRanking(cat13, "A") : [];
                     const pB = pool13Ready ? getPoolRanking(cat13, "B") : [];
-                    if (pool13Ready && pB[0] && pA[1]) {
-                        desiredAssignments[m13.id] = { home: pB[0], away: pA[1] };
-                    }
+                    desiredAssignments[m13.id] = (pool13Ready && pB[0] && pA[1])
+                        ? { home: pB[0], away: pA[1] }
+                        : { home: null, away: null };
                 }
 
                 // Match 14: 1A vs 2B (U20 Semi Final 2)
@@ -991,9 +1099,9 @@
                     const pool14Ready = this.areAllPoolMatchesFinal(edYear, cat14);
                     const pA = pool14Ready ? getPoolRanking(cat14, "A") : [];
                     const pB = pool14Ready ? getPoolRanking(cat14, "B") : [];
-                    if (pool14Ready && pA[0] && pB[1]) {
-                        desiredAssignments[m14.id] = { home: pA[0], away: pB[1] };
-                    }
+                    desiredAssignments[m14.id] = (pool14Ready && pA[0] && pB[1])
+                        ? { home: pA[0], away: pB[1] }
+                        : { home: null, away: null };
                 }
 
                 // Match 15: U16 Plate Final (2A vs 2B of U16)
@@ -1003,9 +1111,9 @@
                     const pool15Ready = this.areAllPoolMatchesFinal(edYear, cat15);
                     const pA = pool15Ready ? getPoolRanking(cat15, "A") : [];
                     const pB = pool15Ready ? getPoolRanking(cat15, "B") : [];
-                    if (pool15Ready && pA[1] && pB[1]) {
-                        desiredAssignments[m15.id] = { home: pA[1], away: pB[1] };
-                    }
+                    desiredAssignments[m15.id] = (pool15Ready && pA[1] && pB[1])
+                        ? { home: pA[1], away: pB[1] }
+                        : { home: null, away: null };
                 }
 
                 // Match 16: U20 Bowl Final (4A vs 4B of U20)
@@ -1015,9 +1123,9 @@
                     const pool16Ready = this.areAllPoolMatchesFinal(edYear, cat16);
                     const pA = pool16Ready ? getPoolRanking(cat16, "A") : [];
                     const pB = pool16Ready ? getPoolRanking(cat16, "B") : [];
-                    if (pool16Ready && pA[3] && pB[3]) {
-                        desiredAssignments[m16.id] = { home: pA[3], away: pB[3] };
-                    }
+                    desiredAssignments[m16.id] = (pool16Ready && pA[3] && pB[3])
+                        ? { home: pA[3], away: pB[3] }
+                        : { home: null, away: null };
                 }
 
                 // Match 17: U20 Plate Final (3A vs 3B of U20)
@@ -1027,9 +1135,9 @@
                     const pool17Ready = this.areAllPoolMatchesFinal(edYear, cat17);
                     const pA = pool17Ready ? getPoolRanking(cat17, "A") : [];
                     const pB = pool17Ready ? getPoolRanking(cat17, "B") : [];
-                    if (pool17Ready && pA[2] && pB[2]) {
-                        desiredAssignments[m17.id] = { home: pA[2], away: pB[2] };
-                    }
+                    desiredAssignments[m17.id] = (pool17Ready && pA[2] && pB[2])
+                        ? { home: pA[2], away: pB[2] }
+                        : { home: null, away: null };
                 }
 
                 // Match 18: U16 Cup Final (1A vs 1B of U16)
@@ -1039,9 +1147,9 @@
                     const pool18Ready = this.areAllPoolMatchesFinal(edYear, cat18);
                     const pA = pool18Ready ? getPoolRanking(cat18, "A") : [];
                     const pB = pool18Ready ? getPoolRanking(cat18, "B") : [];
-                    if (pool18Ready && pA[0] && pB[0]) {
-                        desiredAssignments[m18.id] = { home: pA[0], away: pB[0] };
-                    }
+                    desiredAssignments[m18.id] = (pool18Ready && pA[0] && pB[0])
+                        ? { home: pA[0], away: pB[0] }
+                        : { home: null, away: null };
                 }
 
                 // Match 19: U20 Cup Final (Winner Match 13 vs Winner Match 14)
@@ -1049,9 +1157,10 @@
                 if (m19) {
                     const w13 = winnerOf(m13);
                     const w14 = winnerOf(m14);
-                    if (w13 && w14) {
-                        desiredAssignments[m19.id] = { home: w13, away: w14 };
-                    }
+                    desiredAssignments[m19.id] = {
+                        home: w13 || null,
+                        away: w14 || null
+                    };
                 }
 
                 let updatedCount = 0;
@@ -1061,9 +1170,9 @@
                     // Do not overwrite already started/finished matches
                     if (match.status !== "SCHEDULED") continue;
 
-                    const nextHome = target.home || match.homeTeamId;
-                    const nextAway = target.away || match.awayTeamId;
-                    if (nextHome === match.homeTeamId && nextAway === match.awayTeamId) continue;
+                    const nextHome = target.home ?? null;
+                    const nextAway = target.away ?? null;
+                    if (nextHome === (match.homeTeamId ?? null) && nextAway === (match.awayTeamId ?? null)) continue;
 
                     match.homeTeamId = nextHome;
                     match.awayTeamId = nextAway;
@@ -1679,11 +1788,15 @@
                 const tabs = [
                     { id: "overview", label: "Global System Overview", icon: "fa-gauge-high" },
                     { id: "tournaments", label: "Manage Tournaments", icon: "fa-trophy" },
+                    { id: "teams", label: "Teams & Registrations", icon: "fa-shield" },
+                    { id: "categories", label: "Categories & Formats", icon: "fa-layer-group" },
                     { id: "users", label: "Official Accounts (Auth & Profiles)", icon: "fa-user-shield" },
                     { id: "matches_admin", label: "Match & Bracket Control", icon: "fa-sitemap" },
                     { id: "live_console", label: "Live Match Scorekeeper Console", icon: "fa-stopwatch" },
                     { id: "security", label: "Activity & Security Logs", icon: "fa-shield-halved" }
                 ];
+                // Normalize legacy 'fixtures' tab id to 'matches_admin' for Super Admin
+                if (this.activeTab === "fixtures") this.activeTab = "matches_admin";
                 if (!tabs.some(t => t.id === this.activeTab)) this.activeTab = "overview";
 
                 return `
@@ -1952,11 +2065,11 @@
                                         ${this.isProvisioning ? 'Creating Supabase Auth Account...' : 'Assign Official Account'}
                                     </button>
                                 </form>
-                            </div>
-                        </div>
-                    ` : ""}
+                    ${this.activeTab === "matches_admin" ? this.renderAdmin("fixtures") : ""}
 
-                    ${this.activeTab === "matches_admin" ? this.renderAdmin() : ""}
+                    ${this.activeTab === "teams" ? this.renderAdmin("teams") : ""}
+
+                    ${this.activeTab === "categories" ? this.renderAdmin("categories") : ""}
 
                     ${this.activeTab === "live_console" ? this.renderScorekeeper() : ""}
 
@@ -1981,20 +2094,20 @@
             },
 
             /* -------------------- TOURNAMENT ADMIN DASHBOARD -------------------- */
-            renderAdmin() {
+            renderAdmin(forcedSubTab = null) {
                 const edYear = TournamentStore.activeEditionYear;
                 const edition = TournamentStore.editions[edYear] || { categories: [] };
                 const isSuperAdmin = AuthManager.hasRole(["SUPER_ADMIN"]);
                 const tabs = [
-                    { id: isSuperAdmin ? "matches_admin" : "teams", label: "Teams & Registrations", icon: "fa-shield" },
+                    { id: "teams", label: "Teams & Registrations", icon: "fa-shield" },
                     { id: "fixtures", label: "Fixtures, Scores & Bracket", icon: "fa-calendar-days" },
                     { id: "live_console", label: "Live Match Scorekeeper Console", icon: "fa-stopwatch" },
                     { id: "categories", label: "Categories & Formats", icon: "fa-sitemap" }
                 ];
-                if (!isSuperAdmin && !tabs.some(t => t.id === this.activeTab)) {
+                if (!forcedSubTab && !isSuperAdmin && !tabs.some(t => t.id === this.activeTab)) {
                     this.activeTab = "teams";
                 }
-                const currentSubTab = isSuperAdmin && this.activeTab === "matches_admin" ? "fixtures" : this.activeTab;
+                const currentSubTab = forcedSubTab || (this.activeTab === "matches_admin" ? "fixtures" : this.activeTab);
 
                 const teams = TournamentStore.teams.filter(t => t.edition === edYear);
                 const matches = MatchEngine.matches.filter(m => m.edition === edYear);
@@ -2003,7 +2116,7 @@
                     <div class="space-y-4">
                         <div class="flex flex-wrap gap-2 border-b border-white/10 pb-3">
                             ${tabs.map(t => `
-                                <button onclick="DashboardViews.activeTab='${t.id}'; App.renderCurrentPage()"
+                                <button type="button" onclick="DashboardViews.switchTab('${t.id}')"
                                     class="px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition ${currentSubTab === t.id ? 'bg-gold-500 text-white shadow-lg' : 'bg-navy-900 text-slate-300 hover:bg-navy-800 border border-white/10'}">
                                     <i class="fa-solid ${t.icon}"></i> ${t.label}
                                 </button>
@@ -2122,14 +2235,18 @@
                                                             <span class="px-2 py-0.5 rounded ${m.status === 'FINAL' ? 'bg-emerald-500/20 text-emerald-700' : m.status === 'LIVE' ? 'bg-red-500/20 text-red-700' : 'bg-slate-200 text-slate-700'}">${m.status}</span>
                                                         </td>
                                                         <td class="p-3 text-right">
-                                                            <div class="inline-flex gap-1.5">
-                                                                <button onclick="DashboardViews.openScorekeeperConsole('${m.id}')"
-                                                                    class="px-2.5 py-1 rounded-lg bg-pitch-600 text-white text-xs font-semibold">
+                                                            <div class="inline-flex flex-wrap justify-end gap-1.5">
+                                                                <button type="button" onclick="DashboardViews.openScorekeeperConsole('${m.id}')"
+                                                                    class="px-2.5 py-1 rounded-lg bg-pitch-600 hover:bg-pitch-500 text-white text-xs font-semibold">
                                                                     Score Console
                                                                 </button>
-                                                                <button onclick="DashboardViews.openEditBracketTeamsModal('${m.id}')"
-                                                                    class="px-2.5 py-1 rounded-lg bg-navy-800 text-slate-200 text-xs font-semibold">
+                                                                <button type="button" onclick="DashboardViews.openEditBracketTeamsModal('${m.id}')"
+                                                                    class="px-2.5 py-1 rounded-lg bg-navy-800 hover:bg-navy-700 text-slate-200 text-xs font-semibold">
                                                                     Set Teams
+                                                                </button>
+                                                                <button type="button" onclick="MatchEngine.confirmResetMatch('${m.id}')"
+                                                                    class="px-2.5 py-1 rounded-lg bg-red-500/15 hover:bg-red-500/25 text-red-700 border border-red-500/30 text-xs font-bold">
+                                                                    <i class="fa-solid fa-rotate-left mr-1"></i>Reset Match
                                                                 </button>
                                                             </div>
                                                         </td>
@@ -2146,20 +2263,82 @@
                         ${currentSubTab === "live_console" ? this.renderScorekeeper() : ""}
 
                         ${currentSubTab === "categories" ? `
-                            <div class="sport-card p-6 rounded-2xl">
-                                <h3 class="font-bold text-white mb-4">Competition Categories &amp; Formats (${edYear})</h3>
-                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                    ${(edition.categories || []).map(c => `
-                                        <div class="p-4 rounded-xl bg-navy-950 border border-white/10">
-                                            <div class="text-xs font-bold text-pitch-400">${c.code}</div>
-                                            <div class="font-bold text-white text-base mt-1">${c.name}</div>
-                                            <div class="text-xs text-slate-400 mt-2 space-y-1">
-                                                <div>Format: <span class="text-slate-200">${c.format}</span></div>
-                                                <div>Pools: <span class="text-slate-200">${c.numberOfPools} pools (${c.teamsPerPool}/pool)</span></div>
-                                                <div>Qualifiers/Pool: <span class="text-slate-200">${c.qualifiersPerPool} teams</span></div>
+                            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                <div class="lg:col-span-2 sport-card p-6 rounded-2xl">
+                                    <div class="flex items-center justify-between mb-4">
+                                        <div>
+                                            <h3 class="font-bold text-white">Competition Categories &amp; Formats (${edYear})</h3>
+                                            <p class="text-xs text-slate-400">Configured divisions, pool counts, and knockout qualification rules.</p>
+                                        </div>
+                                        <span class="px-2.5 py-1 rounded-full bg-pitch-600/15 text-pitch-400 text-xs font-bold">${(edition.categories || []).length} Categories</span>
+                                    </div>
+                                    ${(edition.categories || []).length === 0 ? `
+                                        <div class="p-6 text-center text-slate-400 text-sm">No categories configured for ${edYear} yet.</div>
+                                    ` : `
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            ${(edition.categories || []).map(c => {
+                                                const catTeamCount = teams.filter(t => t.categoryId === c.id || t.category === c.name).length;
+                                                return `
+                                                    <div class="p-4 rounded-xl bg-navy-950 border border-white/10 flex flex-col justify-between gap-3">
+                                                        <div>
+                                                            <div class="flex items-center justify-between">
+                                                                <span class="text-xs font-bold text-pitch-400">${c.code}</span>
+                                                                <span class="text-[11px] px-2 py-0.5 rounded bg-navy-800 font-semibold">${catTeamCount} Teams</span>
+                                                            </div>
+                                                            <div class="font-bold text-white text-base mt-1">${c.name}</div>
+                                                            <div class="text-xs text-slate-400 mt-2 space-y-1">
+                                                                <div>Format: <span class="text-slate-200 font-medium">${c.format}</span></div>
+                                                                <div>Pools: <span class="text-slate-200 font-medium">${c.numberOfPools} pools (${c.teamsPerPool} teams/pool)</span></div>
+                                                                <div>Qualifiers/Pool: <span class="text-slate-200 font-medium">${c.qualifiersPerPool} teams advance</span></div>
+                                                            </div>
+                                                        </div>
+                                                        <div class="pt-2 border-t border-white/10 flex justify-end">
+                                                            <button type="button" onclick="DashboardViews.openEditCategoryModal('${c.id}')"
+                                                                class="px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 text-xs font-bold">
+                                                                <i class="fa-solid fa-pen-to-square mr-1"></i> Edit Category
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                `;
+                                            }).join("")}
+                                        </div>
+                                    `}
+                                </div>
+
+                                <div class="sport-card p-6 rounded-2xl">
+                                    <h3 class="font-bold text-white mb-4">Add Category &amp; Format (${edYear})</h3>
+                                    <form onsubmit="DashboardViews.handleAddCategory(event)" class="space-y-3">
+                                        <div>
+                                            <label class="block text-xs text-slate-400 mb-1">Category Name *</label>
+                                            <input type="text" id="adm-cat-name" required placeholder="e.g., Men's Open / U16 Boys"
+                                                class="w-full bg-navy-950 border border-white/15 rounded-xl px-3 py-2 text-sm text-white">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs text-slate-400 mb-1">Competition Format *</label>
+                                            <input type="text" id="adm-cat-format" required value="Pool & Knockout"
+                                                class="w-full bg-navy-950 border border-white/15 rounded-xl px-3 py-2 text-sm text-white">
+                                        </div>
+                                        <div class="grid grid-cols-3 gap-2">
+                                            <div>
+                                                <label class="block text-xs text-slate-400 mb-1">Pools *</label>
+                                                <input type="number" id="adm-cat-pools" min="1" max="8" value="2" required
+                                                    class="w-full bg-navy-950 border border-white/15 rounded-xl px-3 py-2 text-sm text-white">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs text-slate-400 mb-1">Teams/Pool *</label>
+                                                <input type="number" id="adm-cat-teams-pool" min="2" max="12" value="4" required
+                                                    class="w-full bg-navy-950 border border-white/15 rounded-xl px-3 py-2 text-sm text-white">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs text-slate-400 mb-1">Qualifiers *</label>
+                                                <input type="number" id="adm-cat-qualifiers" min="1" max="4" value="2" required
+                                                    class="w-full bg-navy-950 border border-white/15 rounded-xl px-3 py-2 text-sm text-white">
                                             </div>
                                         </div>
-                                    `).join("")}
+                                        <button type="submit" class="w-full py-2.5 rounded-xl bg-pitch-600 hover:bg-pitch-500 text-white font-semibold text-sm transition">
+                                            <i class="fa-solid fa-plus mr-1"></i> Add Category in Supabase
+                                        </button>
+                                    </form>
                                 </div>
                             </div>
                         ` : ""}
@@ -2378,21 +2557,21 @@
                                             <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'YELLOW_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-yellow-500/20 hover:bg-yellow-500/30 disabled:opacity-40 text-yellow-700 border border-yellow-500/40 font-bold text-xs text-center transition">
                                                 <i class="fa-solid fa-square text-yellow-500 mr-1"></i> YELLOW CARD
-                                            </button>
-                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'RED_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
-                                                class="p-3 rounded-xl bg-red-500/20 hover:bg-red-500/30 disabled:opacity-40 text-red-700 border border-red-500/40 font-bold text-xs text-center transition">
-                                                <i class="fa-solid fa-square text-red-600 mr-1"></i> RED CARD
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- Bottom Action Bar: Undo & Confirm Official Result -->
+                                <!-- Bottom Action Bar: Undo, Reset Match & Confirm Official Result -->
                                 <div class="mt-6 pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-4">
-                                    <button onclick="MatchEngine.undoLastEvent('${activeMatch.id}')" ${activeMatch.officialConfirmed || activeMatch.events.length === 0 ? 'disabled' : ''}
-                                        class="px-4 py-2.5 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-slate-200 border border-white/15 text-xs font-semibold">
-                                        <i class="fa-solid fa-rotate-left mr-1.5"></i> Undo Last Event
-                                    </button>
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <button onclick="MatchEngine.undoLastEvent('${activeMatch.id}')" ${activeMatch.officialConfirmed || activeMatch.events.length === 0 ? 'disabled' : ''}
+                                            class="px-4 py-2.5 rounded-xl bg-navy-800 hover:bg-navy-700 disabled:opacity-40 text-slate-200 border border-white/15 text-xs font-semibold">
+                                            <i class="fa-solid fa-rotate-left mr-1.5"></i> Undo Last Event
+                                        </button>
+
+                                        ${AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"]) ? `
+                                            <button type="button" onclick="MatchEngine.confirmResetMatch('${activeMatch.id}')"
+                                                class="px-4 py-2.5 rounded-xl bg-red-500/15 hover:bg-red-500/25 text-red-700 border border-red-500/40 text-xs font-bold">
+                                                <i class="fa-solid fa-arrow-rotate-left mr-1.5"></i> Reset Match
+                                            </button>
+                                        ` : ''}
+                                    </div>
 
                                     <button onclick="MatchEngine.confirmOfficialResult('${activeMatch.id}')" ${activeMatch.officialConfirmed ? 'disabled' : ''}
                                         class="px-6 py-3 rounded-xl bg-gradient-to-r from-pitch-600 to-emerald-600 hover:from-pitch-500 hover:to-emerald-500 disabled:opacity-40 text-white font-bold text-sm shadow-lg flex items-center gap-2">
@@ -2418,6 +2597,8 @@
                     await AuthManager.fetchOfficialProfiles();
                 } else if (tabId === "tournaments" && AuthManager.hasRole(["SUPER_ADMIN"])) {
                     await SupabaseData.loadAllTournamentsList();
+                } else if (["teams", "categories", "fixtures", "matches_admin"].includes(tabId)) {
+                    await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
                 }
                 App.renderCurrentPage();
             },
@@ -2864,6 +3045,115 @@
                 AuthManager.logAudit(`Registered team ${name} in ${pool_name}`);
                 UI.toast(`Pasukan ${name} berjaya didaftarkan dalam Supabase.`, "success");
                 App.renderCurrentPage();
+            },
+
+            async handleAddCategory(e) {
+                e.preventDefault();
+                if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) return;
+                const edYear = TournamentStore.activeEditionYear;
+                const tournamentId = TournamentStore.editions[edYear]?.id;
+                if (!tournamentId) {
+                    UI.toast("Active tournament ID not found.", "error");
+                    return;
+                }
+
+                const name = document.getElementById("adm-cat-name").value.trim();
+                const format = document.getElementById("adm-cat-format").value.trim() || "Pool & Knockout";
+                const number_of_pools = Math.max(1, parseInt(document.getElementById("adm-cat-pools").value, 10) || 1);
+                const teams_per_pool = Math.max(2, parseInt(document.getElementById("adm-cat-teams-pool").value, 10) || 4);
+                const qualifiers_per_pool = Math.max(1, parseInt(document.getElementById("adm-cat-qualifiers").value, 10) || 2);
+
+                const { error } = await SupabaseConfig.client
+                    .from("categories")
+                    .insert({
+                        tournament_id: tournamentId,
+                        name,
+                        format,
+                        number_of_pools,
+                        teams_per_pool,
+                        qualifiers_per_pool
+                    });
+
+                if (error) {
+                    UI.toast("Failed to add category: " + error.message, "error");
+                    return;
+                }
+
+                await SupabaseData.loadTournamentByYear(edYear);
+                AuthManager.logAudit(`Added category ${name} (${format})`);
+                UI.toast(`Category "${name}" saved to Supabase.`, "success");
+                App.renderCurrentPage();
+            },
+
+            openEditCategoryModal(categoryId) {
+                if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) return;
+                const edYear = TournamentStore.activeEditionYear;
+                const cat = (TournamentStore.editions[edYear]?.categories || []).find(c => c.id === categoryId);
+                if (!cat) return;
+
+                UI.showModal(
+                    `Edit Category: ${cat.name}`,
+                    `<div class="space-y-3 text-xs">
+                        <div>
+                            <label class="block font-semibold mb-1">Category Name *</label>
+                            <input type="text" id="edit-cat-name" value="${Views.escapeHtml(cat.name)}" required class="w-full border rounded-xl px-3 py-2 text-sm">
+                        </div>
+                        <div>
+                            <label class="block font-semibold mb-1">Competition Format *</label>
+                            <input type="text" id="edit-cat-format" value="${Views.escapeHtml(cat.format)}" required class="w-full border rounded-xl px-3 py-2 text-sm">
+                        </div>
+                        <div class="grid grid-cols-3 gap-2">
+                            <div>
+                                <label class="block font-semibold mb-1">Pools</label>
+                                <input type="number" id="edit-cat-pools" min="1" max="8" value="${cat.numberOfPools}" class="w-full border rounded-xl px-3 py-2 text-sm">
+                            </div>
+                            <div>
+                                <label class="block font-semibold mb-1">Teams/Pool</label>
+                                <input type="number" id="edit-cat-teams-pool" min="2" max="12" value="${cat.teamsPerPool}" class="w-full border rounded-xl px-3 py-2 text-sm">
+                            </div>
+                            <div>
+                                <label class="block font-semibold mb-1">Qualifiers</label>
+                                <input type="number" id="edit-cat-qualifiers" min="1" max="4" value="${cat.qualifiersPerPool}" class="w-full border rounded-xl px-3 py-2 text-sm">
+                            </div>
+                        </div>
+                    </div>`,
+                    [
+                        { label: "Cancel", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() },
+                        {
+                            label: "Save Category",
+                            icon: "fa-floppy-disk",
+                            style: "primary",
+                            onClick: async () => {
+                                const name = document.getElementById("edit-cat-name").value.trim();
+                                const format = document.getElementById("edit-cat-format").value.trim();
+                                const number_of_pools = Math.max(1, parseInt(document.getElementById("edit-cat-pools").value, 10) || 1);
+                                const teams_per_pool = Math.max(2, parseInt(document.getElementById("edit-cat-teams-pool").value, 10) || 4);
+                                const qualifiers_per_pool = Math.max(1, parseInt(document.getElementById("edit-cat-qualifiers").value, 10) || 2);
+
+                                if (!name || !format) {
+                                    UI.toast("Category name and format are required.", "error");
+                                    return;
+                                }
+
+                                const { error } = await SupabaseConfig.client
+                                    .from("categories")
+                                    .update({ name, format, number_of_pools, teams_per_pool, qualifiers_per_pool })
+                                    .eq("id", categoryId);
+
+                                if (error) {
+                                    UI.toast("Failed to update category: " + error.message, "error");
+                                    return;
+                                }
+
+                                UI.closeModal();
+                                await SupabaseData.loadTournamentByYear(edYear);
+                                AuthManager.logAudit(`Updated category ${name}`);
+                                UI.toast(`Category "${name}" updated.`, "success");
+                                App.renderCurrentPage();
+                            }
+                        }
+                    ]
+                );
             },
 
             openEditBracketTeamsModal(matchId) {
