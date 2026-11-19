@@ -39,7 +39,7 @@
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         button, a { -webkit-tap-highlight-color: transparent; }
-    
+
         /* KEMUNING 10s requested theme: light blue, dark blue, white and orange */
         :root { color-scheme: light; }
         body { background: #EAF6FC !important; color: #102C50 !important; }
@@ -2065,6 +2065,10 @@
                                         ${this.isProvisioning ? 'Creating Supabase Auth Account...' : 'Assign Official Account'}
                                     </button>
                                 </form>
+                            </div>
+                        </div>
+                    ` : ""}
+
                     ${this.activeTab === "matches_admin" ? this.renderAdmin("fixtures") : ""}
 
                     ${this.activeTab === "teams" ? this.renderAdmin("teams") : ""}
@@ -2557,6 +2561,15 @@
                                             <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'YELLOW_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
                                                 class="p-3 rounded-xl bg-yellow-500/20 hover:bg-yellow-500/30 disabled:opacity-40 text-yellow-700 border border-yellow-500/40 font-bold text-xs text-center transition">
                                                 <i class="fa-solid fa-square text-yellow-500 mr-1"></i> YELLOW CARD
+                                            </button>
+                                            <button onclick="MatchEngine.recordMatchEvent('${activeMatch.id}', 'AWAY', 'RED_CARD', document.getElementById('sk-player-input').value)" ${activeMatch.officialConfirmed ? 'disabled' : ''}
+                                                class="p-3 rounded-xl bg-red-500/20 hover:bg-red-500/30 disabled:opacity-40 text-red-700 border border-red-500/40 font-bold text-xs text-center transition">
+                                                <i class="fa-solid fa-square text-red-600 mr-1"></i> RED CARD
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <!-- Bottom Action Bar: Undo, Reset Match & Confirm Official Result -->
                                 <div class="mt-6 pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-4">
                                     <div class="flex flex-wrap items-center gap-2">
@@ -4425,26 +4438,3 @@
     </script>
 </body>
 </html>
-```
-
-### Exact Code Section Changed
-
-In `MatchEngine.persistMatchStateToSupabase` (`index.html`), the mapping for `resultStatus` written to `public.match_results.status` was updated so it only sends valid `public.result_status` enum values:
-
-**Before:**
-```javascript
-const resultStatus = match.officialConfirmed
-    ? "confirmed"
-    : (match.status === "LIVE" || match.status === "FINAL" ? "provisional" : "scheduled");
-```
-
-**After:**
-```javascript
-const resultStatus = match.officialConfirmed
-    ? "official"
-    : (match.status === "CANCELLED" ? "cancelled" : "draft");
-```
-
-* Unconfirmed live/in-progress scores now send **`"draft"`** instead of `"provisional"` or `"scheduled"`.
-* Confirmed and published results now send **`"official"`**.
-* Cancelled matches map cleanly to **`"cancelled"`**.
