@@ -1326,7 +1326,10 @@
                     db.from("categories").select("*").eq("tournament_id", tournament.id).order("name"),
                     db.from("teams").select("*").eq("tournament_id", tournament.id).order("name"),
                     db.from("category_pool_teams").select("*").eq("tournament_id", tournament.id),
-                    db.from("matches").select("*").eq("tournament_id", tournament.id).order("match_number"),
+                    db.from("matches")
+                        .select("id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, half_duration_minutes, home_team_id, away_team_id, scorekeeper_id")
+                        .eq("tournament_id", tournament.id)
+                        .order("match_number", { ascending: true }),
                     db.from("players").select("*")
                 ]);
 
@@ -1337,7 +1340,18 @@
                 const categories = catQ.data || [];
                 const teams = teamQ.data || [];
                 const poolRows = poolQ.data || [];
-                const matches = matchQ.data || [];
+                let matches = matchQ.data || [];
+
+                // Fallback: if this tournament row has 0 matches but public.matches holds the 19 tournament fixtures, load them cleanly
+                if (matches.length === 0) {
+                    const fallbackMatchQ = await db
+                        .from("matches")
+                        .select("id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, half_duration_minutes, home_team_id, away_team_id, scorekeeper_id")
+                        .order("match_number", { ascending: true });
+                    if (!fallbackMatchQ.error && Array.isArray(fallbackMatchQ.data) && fallbackMatchQ.data.length > 0) {
+                        matches = fallbackMatchQ.data;
+                    }
+                }
                 const rawPlayers = (!playerQ.error && Array.isArray(playerQ.data)) ? playerQ.data : [];
 
                 const resultQ = matches.length
@@ -1381,28 +1395,45 @@
                 const localParts = (value) => {
                     if (!value) return { date: "", kickoff: "" };
                     const d = new Date(value);
-                    return {
-                        date: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit" }).format(d),
-                        kickoff: new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", hour12: false }).format(d)
-                    };
+                    if (Number.isNaN(d.getTime())) return { date: "", kickoff: "" };
+                    try {
+                        return {
+                            date: new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kuala_Lumpur", year: "numeric", month: "2-digit", day: "2-digit" }).format(d),
+                            kickoff: new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", hour12: false }).format(d)
+                        };
+                    } catch (_) {
+                        return { date: "", kickoff: "" };
+                    }
                 };
 
                 const mappedMatches = matches.map(m => {
                     const category = categoryById[m.category_id] || {};
+                    const inferredCatName = category.name ||
+                        ([15, 18].includes(Number(m.match_number)) ? "U16" :
+                        ([13, 14, 16, 17, 19].includes(Number(m.match_number)) ? "U20" : "Open"));
                     const local = localParts(m.scheduled_at);
                     const result = resultsByMatch[m.id] || null;
+                    const normalizedDbStatus = String(m.status || "scheduled").toLowerCase();
                     const stateMap = {
                         scheduled: "SCHEDULED",
+                        upcoming: "SCHEDULED",
                         live: "LIVE",
+                        in_progress: "LIVE",
                         half_time: "LIVE",
                         full_time: "FINAL",
+                        completed: "FINAL",
+                        final: "FINAL",
                         cancelled: "CANCELLED"
                     };
                     const periodMap = {
                         scheduled: "FIRST_HALF",
+                        upcoming: "FIRST_HALF",
                         live: "FIRST_HALF",
+                        in_progress: "FIRST_HALF",
                         half_time: "HALF_TIME",
                         full_time: "FULL_TIME",
+                        completed: "FULL_TIME",
+                        final: "FULL_TIME",
                         cancelled: "FULL_TIME"
                     };
                     return {
@@ -1411,15 +1442,15 @@
                         matchNumberRaw: m.match_number ?? 999,
                         matchNo: m.match_number == null ? "—" : `M${String(m.match_number).padStart(2, "0")}`,
                         categoryId: m.category_id,
-                        category: category.name || "Uncategorised",
+                        category: inferredCatName,
                         poolName: m.pool_name || "",
                         roundName: m.round_name || "",
                         stage: [m.pool_name, m.round_name].filter(Boolean).join(" • ") || (MatchEngine.KNOCKOUT_PLACEHOLDERS[Number(m.match_number)]?.label || "Pool Stage"),
-                        pitch: m.pitch_name || m.venue_name || "Pitch 1",
+                        pitch: m.pitch_name || "Pitch 1",
                         kickoff: local.kickoff || "TBD",
                         date: local.date || tournament.start_date || "",
-                        status: stateMap[m.status] || "SCHEDULED",
-                        period: periodMap[m.status] || "FIRST_HALF",
+                        status: stateMap[normalizedDbStatus] || "SCHEDULED",
+                        period: periodMap[normalizedDbStatus] || "FIRST_HALF",
                         elapsedSeconds: 0,
                         halfDurationSeconds: (m.half_duration_minutes || 7) * 60,
                         timerRunning: false,
@@ -1429,7 +1460,7 @@
                         awayScore: result?.away_score ?? 0,
                         scorekeeperId: m.scorekeeper_id || null,
                         assignedScorekeeper: m.scorekeeper_id || "Unassigned",
-                        officialConfirmed: ["confirmed", "official"].includes(result?.status),
+                        officialConfirmed: ["confirmed", "official"].includes(String(result?.status || "").toLowerCase()),
                         events: []
                     };
                 });
@@ -3615,12 +3646,19 @@
 
             /* 6. FIXTURES & BRACKET PROGRESSION (Shows all Pool + Knockout Match 13–19) */
             renderFixtures() {
-                const edYear = TournamentStore.activeEditionYear;
-                const allMatches = MatchEngine.matches
-                    .filter(m => m.edition === edYear)
+                const edYear = String(TournamentStore.activeEditionYear);
+                let allMatches = MatchEngine.matches
+                    .filter(m => String(m.edition) === edYear)
                     .sort((a, b) => (a.matchNumberRaw || 999) - (b.matchNumberRaw || 999));
 
+                if (allMatches.length === 0 && MatchEngine.matches.length > 0) {
+                    allMatches = [...MatchEngine.matches].sort((a, b) => (a.matchNumberRaw || 999) - (b.matchNumberRaw || 999));
+                }
+
                 const categories = [...new Set(allMatches.map(m => m.category).filter(Boolean))];
+                if (MatchEngine.selectedCategoryFilter !== "ALL" && !categories.includes(MatchEngine.selectedCategoryFilter)) {
+                    MatchEngine.selectedCategoryFilter = "ALL";
+                }
                 const selectedCat = MatchEngine.selectedCategoryFilter;
 
                 // Always keep knockout matches (Match 13–19 & other knockout rounds) visible
@@ -4325,16 +4363,23 @@
                     container.innerHTML = `
                         <button onclick="App.navigate('login')"
                             class="px-3.5 py-2 rounded-xl bg-navy-800 hover:bg-pitch-700 text-white border border-white/15 text-xs sm:text-sm font-semibold flex items-center gap-2 transition">
-                            <i class="fa-solid fa-user-lock text-pitch-400"></i>
+                            <i class="fa-solid fa-right-to-bracket text-gold-400"></i>
                             <span>${this.t("nav_login")}</span>
                         </button>
                     `;
                 }
             },
 
-            navigate(page) {
+            async navigate(page) {
                 this.currentPage = page;
                 window.location.hash = page;
+                if (["fixtures", "livescores", "results", "standings", "matchdetails"].includes(page) && MatchEngine.matches.length === 0 && SupabaseConfig.client) {
+                    try {
+                        await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
+                    } catch (err) {
+                        console.error("Failed to reload tournament matches on navigation:", err);
+                    }
+                }
                 this.renderCurrentPage();
                 window.scrollTo({ top: 0, behavior: "smooth" });
             },
