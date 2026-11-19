@@ -382,9 +382,9 @@
                     year: "2026",
                     name: "KEMUNING 10s Rugby Invitational 2026",
                     status: "LIVE",
-                    startDate: "2026-11-18",
-                    endDate: "2026-11-19",
-                    dates: "18 – 19 November 2026",
+                    startDate: "2026-11-21",
+                    endDate: "2026-11-21",
+                    dates: "21 November 2026",
                     venue: "Padang Ragbi ADTEC Shah Alam, Selangor",
                     organizer: "Kemuning Rugby Club & Selangor Rugby Union",
                     description: "Official 10-a-side rugby tournament management platform.",
@@ -440,39 +440,39 @@
             // Knockout placeholder labels for Match 13–19 before qualification is finalized
             KNOCKOUT_PLACEHOLDERS: {
                 13: {
-                    label: "1B vs 2A — Pending Qualification",
-                    homeSlot: "1B (Pool B #1)",
-                    awaySlot: "2A (Pool A #2)"
+                    label: "U20 Semi Final 1 • 1B vs 2A",
+                    homeSlot: "1B",
+                    awaySlot: "2A"
                 },
                 14: {
-                    label: "1A vs 2B — Pending Qualification",
-                    homeSlot: "1A (Pool A #1)",
-                    awaySlot: "2B (Pool B #2)"
+                    label: "U20 Semi Final 2 • 1A vs 2B",
+                    homeSlot: "1A",
+                    awaySlot: "2B"
                 },
                 15: {
-                    label: "U16 Plate Final — Pending Qualification",
-                    homeSlot: "U16 Plate Finalist 1",
-                    awaySlot: "U16 Plate Finalist 2"
+                    label: "U16 Plate Final • 3rd vs 4th",
+                    homeSlot: "U16 3rd",
+                    awaySlot: "U16 4th"
                 },
                 16: {
-                    label: "U20 Bowl Final — Pending Qualification",
-                    homeSlot: "U20 Bowl Finalist 1",
-                    awaySlot: "U20 Bowl Finalist 2"
+                    label: "U20 Bowl Final • 3A vs 3B",
+                    homeSlot: "U20 3A",
+                    awaySlot: "U20 3B"
                 },
                 17: {
-                    label: "U20 Plate Final — Pending Qualification",
-                    homeSlot: "U20 Plate Finalist 1",
-                    awaySlot: "U20 Plate Finalist 2"
+                    label: "U20 Plate Final • Loser SF1 vs Loser SF2",
+                    homeSlot: "Loser SF1",
+                    awaySlot: "Loser SF2"
                 },
                 18: {
-                    label: "U16 Cup Final — Pending Qualification",
-                    homeSlot: "U16 Cup Finalist 1",
-                    awaySlot: "U16 Cup Finalist 2"
+                    label: "U16 Cup Final • 1st vs 2nd",
+                    homeSlot: "U16 1st",
+                    awaySlot: "U16 2nd"
                 },
                 19: {
-                    label: "U20 Cup Final — Pending Qualification",
-                    homeSlot: "U20 Cup Finalist 1",
-                    awaySlot: "U20 Cup Finalist 2"
+                    label: "U20 Cup Final • Winner SF1 vs Winner SF2",
+                    homeSlot: "Winner SF1",
+                    awaySlot: "Winner SF2"
                 }
             },
 
@@ -521,12 +521,17 @@
 
             getTeam(teamId, fallbackLabel = null) {
                 if (!teamId) {
-                    const label = fallbackLabel || "Pending Qualification";
-                    return { id: null, name: label, short: "TBD", color: "#94A3B8", pool: "-", category: "-", isPending: true };
+                    const slotText = (fallbackLabel || "").trim();
+                    const label = slotText ? `${slotText} — Pending Qualification` : "Pending Qualification";
+                    return { id: null, name: label, slotLabel: slotText || "TBD", short: "TBD", color: "#94A3B8", pool: "-", category: "-", isPending: true };
                 }
-                return TournamentStore.teams.find(t => t.id === teamId) || {
+                const found = TournamentStore.teams.find(t => t.id === teamId);
+                if (found) return found;
+                const slotText = (fallbackLabel || "").trim();
+                return {
                     id: teamId,
-                    name: fallbackLabel || "Pending Qualification",
+                    name: slotText ? `${slotText} — Pending Qualification` : "Pending Qualification",
+                    slotLabel: slotText || "TBD",
                     short: "TBD",
                     color: "#94A3B8",
                     pool: "-",
@@ -542,19 +547,23 @@
                 const awayQualified = Boolean(match?.awayTeamId && TournamentStore.teams.some(t => t.id === match.awayTeamId));
                 const isPendingQualification = !homeQualified || !awayQualified;
 
-                const homeFallback = meta
-                    ? meta.homeSlot
-                    : (match?.homePlaceholder || "Pending Qualification");
-                const awayFallback = meta
-                    ? meta.awaySlot
-                    : (match?.awayPlaceholder || "Pending Qualification");
+                const homeSlot = (match?.homeLabel || "").trim() || (meta ? meta.homeSlot : "");
+                const awaySlot = (match?.awayLabel || "").trim() || (meta ? meta.awaySlot : "");
+
+                const roundTitle = (match?.roundName || match?.stage || (meta ? meta.label : "Knockout")).trim();
+                const vsSummary = (homeSlot && awaySlot) ? `${homeSlot} vs ${awaySlot}` : "";
+                const pendingBanner = vsSummary && !roundTitle.toLowerCase().includes(vsSummary.toLowerCase())
+                    ? `${roundTitle} • ${vsSummary}`
+                    : (roundTitle || (meta ? meta.label : "Pending Qualification"));
 
                 return {
                     matchNumber: mNum,
                     hasMeta: Boolean(meta),
-                    pendingBanner: meta ? meta.label : `${match?.stage || "Knockout"} — Pending Qualification`,
-                    homeTeam: this.getTeam(match?.homeTeamId, homeFallback),
-                    awayTeam: this.getTeam(match?.awayTeamId, awayFallback),
+                    pendingBanner,
+                    homeSlot,
+                    awaySlot,
+                    homeTeam: this.getTeam(match?.homeTeamId, homeSlot),
+                    awayTeam: this.getTeam(match?.awayTeamId, awaySlot),
                     isPendingQualification
                 };
             },
@@ -814,6 +823,10 @@
                     UI.toast("Cannot modify events after official result confirmation.", "error");
                     return;
                 }
+                if (!match.homeTeamId || !match.awayTeamId) {
+                    UI.toast("Match teams are still Pending Qualification. Assign qualified teams before scoring.", "warning");
+                    return;
+                }
 
                 const pointsMap = {
                     TRY: 5,
@@ -862,6 +875,10 @@
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) return;
                 const match = this.getMatch(matchId);
                 if (!match) return;
+                if (!match.homeTeamId || !match.awayTeamId) {
+                    UI.toast("Match teams are still Pending Qualification. Assign qualified teams before scoring.", "warning");
+                    return;
+                }
                 if (match.officialConfirmed && !AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) {
                     UI.toast("Only Admin or Super Admin can edit confirmed match scores.", "error");
                     return;
@@ -896,6 +913,10 @@
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) return;
                 const match = this.getMatch(matchId);
                 if (!match) return;
+                if (!match.homeTeamId || !match.awayTeamId) {
+                    UI.toast("Cannot confirm result while match participants are still Pending Qualification.", "warning");
+                    return;
+                }
                 const desc = this.getKnockoutDescriptor(match);
 
                 UI.showModal(
@@ -1044,7 +1065,15 @@
                 return poolMatches.every(m => m.status === "FINAL");
             },
 
-            // Automatically resolve & update existing knockout matches (Match 13–19 & other knockouts)
+            // Automatically resolve & update existing knockout matches (Match 13–19)
+            // Rules:
+            //   Match 13 (U20 Semi Final 1): 1B vs 2A
+            //   Match 14 (U20 Semi Final 2): 1A vs 2B
+            //   Match 15 (U16 Plate Final): U16 3rd vs 4th
+            //   Match 16 (U20 Bowl Final): U20 3A vs 3B
+            //   Match 17 (U20 Plate Final): Loser SF1 (M13) vs Loser SF2 (M14)
+            //   Match 18 (U16 Cup Final): U16 1st vs 2nd
+            //   Match 19 (U20 Cup Final): Winner SF1 (M13) vs Winner SF2 (M14)
             // Never creates or duplicates match rows; only updates home_team_id / away_team_id on existing rows
             async syncKnockoutQualificationFromStandings(editionYear, options = {}) {
                 const edYear = String(editionYear || TournamentStore.activeEditionYear);
@@ -1057,11 +1086,14 @@
                     AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])
                 );
 
-                // Helper: find existing match by match_number
                 const byNum = (num) => editionMatches.find(m => Number(m.matchNumberRaw) === Number(num)) || null;
                 const winnerOf = (m) => {
                     if (!m || m.status !== "FINAL" || !m.homeTeamId || !m.awayTeamId || m.homeScore === m.awayScore) return null;
                     return m.homeScore > m.awayScore ? m.homeTeamId : m.awayTeamId;
+                };
+                const loserOf = (m) => {
+                    if (!m || m.status !== "FINAL" || !m.homeTeamId || !m.awayTeamId || m.homeScore === m.awayScore) return null;
+                    return m.homeScore > m.awayScore ? m.awayTeamId : m.homeTeamId;
                 };
 
                 // Helper: get Pool standings by category & pool letter ('A' or 'B')
@@ -1074,13 +1106,19 @@
                     return this.computeStandings(edYear, catName, matchingPoolName).map(r => r.team.id);
                 };
 
+                // Helper: get overall category standings (e.g., U16 single table 1st, 2nd, 3rd, 4th)
+                const getOverallCategoryRanking = (catName) => {
+                    if (!catName) return [];
+                    return this.computeStandings(edYear, catName, "ALL").map(r => r.team.id);
+                };
+
                 const categories = [...new Set(TournamentStore.teams.filter(t => t.edition === edYear).map(t => t.category).filter(Boolean))];
                 const u20Cat = categories.find(c => /u20|under\s*20|open|men/i.test(c)) || categories[0] || "";
                 const u16Cat = categories.find(c => /u16|under\s*16|junior/i.test(c)) || categories[1] || "";
 
                 const desiredAssignments = {};
 
-                // Match 13: 1B vs 2A (U20 Semi Final 1)
+                // Match 13: U20 Semi Final 1 — 1B vs 2A
                 const m13 = byNum(13);
                 if (m13) {
                     const cat13 = m13.category || u20Cat;
@@ -1092,7 +1130,7 @@
                         : { home: null, away: null };
                 }
 
-                // Match 14: 1A vs 2B (U20 Semi Final 2)
+                // Match 14: U20 Semi Final 2 — 1A vs 2B
                 const m14 = byNum(14);
                 if (m14) {
                     const cat14 = m14.category || u20Cat;
@@ -1104,55 +1142,52 @@
                         : { home: null, away: null };
                 }
 
-                // Match 15: U16 Plate Final (2A vs 2B of U16)
+                // Match 15: U16 Plate Final — U16 3rd vs 4th
                 const m15 = byNum(15);
                 if (m15) {
                     const cat15 = m15.category || u16Cat;
                     const pool15Ready = this.areAllPoolMatchesFinal(edYear, cat15);
-                    const pA = pool15Ready ? getPoolRanking(cat15, "A") : [];
-                    const pB = pool15Ready ? getPoolRanking(cat15, "B") : [];
-                    desiredAssignments[m15.id] = (pool15Ready && pA[1] && pB[1])
-                        ? { home: pA[1], away: pB[1] }
+                    const u16Rank = pool15Ready ? getOverallCategoryRanking(cat15) : [];
+                    desiredAssignments[m15.id] = (pool15Ready && u16Rank[2] && u16Rank[3])
+                        ? { home: u16Rank[2], away: u16Rank[3] }
                         : { home: null, away: null };
                 }
 
-                // Match 16: U20 Bowl Final (4A vs 4B of U20)
+                // Match 16: U20 Bowl Final — U20 3A vs 3B
                 const m16 = byNum(16);
                 if (m16) {
                     const cat16 = m16.category || u20Cat;
                     const pool16Ready = this.areAllPoolMatchesFinal(edYear, cat16);
                     const pA = pool16Ready ? getPoolRanking(cat16, "A") : [];
                     const pB = pool16Ready ? getPoolRanking(cat16, "B") : [];
-                    desiredAssignments[m16.id] = (pool16Ready && pA[3] && pB[3])
-                        ? { home: pA[3], away: pB[3] }
-                        : { home: null, away: null };
-                }
-
-                // Match 17: U20 Plate Final (3A vs 3B of U20)
-                const m17 = byNum(17);
-                if (m17) {
-                    const cat17 = m17.category || u20Cat;
-                    const pool17Ready = this.areAllPoolMatchesFinal(edYear, cat17);
-                    const pA = pool17Ready ? getPoolRanking(cat17, "A") : [];
-                    const pB = pool17Ready ? getPoolRanking(cat17, "B") : [];
-                    desiredAssignments[m17.id] = (pool17Ready && pA[2] && pB[2])
+                    desiredAssignments[m16.id] = (pool16Ready && pA[2] && pB[2])
                         ? { home: pA[2], away: pB[2] }
                         : { home: null, away: null };
                 }
 
-                // Match 18: U16 Cup Final (1A vs 1B of U16)
+                // Match 17: U20 Plate Final — Loser SF1 (M13) vs Loser SF2 (M14)
+                const m17 = byNum(17);
+                if (m17) {
+                    const l13 = loserOf(m13);
+                    const l14 = loserOf(m14);
+                    desiredAssignments[m17.id] = {
+                        home: l13 || null,
+                        away: l14 || null
+                    };
+                }
+
+                // Match 18: U16 Cup Final — U16 1st vs 2nd
                 const m18 = byNum(18);
                 if (m18) {
                     const cat18 = m18.category || u16Cat;
                     const pool18Ready = this.areAllPoolMatchesFinal(edYear, cat18);
-                    const pA = pool18Ready ? getPoolRanking(cat18, "A") : [];
-                    const pB = pool18Ready ? getPoolRanking(cat18, "B") : [];
-                    desiredAssignments[m18.id] = (pool18Ready && pA[0] && pB[0])
-                        ? { home: pA[0], away: pB[0] }
+                    const u16Rank = pool18Ready ? getOverallCategoryRanking(cat18) : [];
+                    desiredAssignments[m18.id] = (pool18Ready && u16Rank[0] && u16Rank[1])
+                        ? { home: u16Rank[0], away: u16Rank[1] }
                         : { home: null, away: null };
                 }
 
-                // Match 19: U20 Cup Final (Winner Match 13 vs Winner Match 14)
+                // Match 19: U20 Cup Final — Winner SF1 (M13) vs Winner SF2 (M14)
                 const m19 = byNum(19);
                 if (m19) {
                     const w13 = winnerOf(m13);
@@ -1321,13 +1356,14 @@
                 }
 
                 const edYear = String(tournament.year);
+                const matchSelectColumns = "id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, match_duration_minutes, half_duration_minutes, home_team_id, away_team_id, home_label, away_label, scorekeeper_id";
 
                 const [catQ, teamQ, poolQ, matchQ, playerQ] = await Promise.all([
                     db.from("categories").select("*").eq("tournament_id", tournament.id).order("name"),
                     db.from("teams").select("*").eq("tournament_id", tournament.id).order("name"),
                     db.from("category_pool_teams").select("*").eq("tournament_id", tournament.id),
                     db.from("matches")
-                        .select("id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, half_duration_minutes, home_team_id, away_team_id, scorekeeper_id")
+                        .select(matchSelectColumns)
                         .eq("tournament_id", tournament.id)
                         .order("match_number", { ascending: true }),
                     db.from("players").select("*")
@@ -1346,7 +1382,7 @@
                 if (matches.length === 0) {
                     const fallbackMatchQ = await db
                         .from("matches")
-                        .select("id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, half_duration_minutes, home_team_id, away_team_id, scorekeeper_id")
+                        .select(matchSelectColumns)
                         .order("match_number", { ascending: true });
                     if (!fallbackMatchQ.error && Array.isArray(fallbackMatchQ.data) && fallbackMatchQ.data.length > 0) {
                         matches = fallbackMatchQ.data;
@@ -1436,6 +1472,9 @@
                         final: "FULL_TIME",
                         cancelled: "FULL_TIME"
                     };
+                    const totalMatchMinutes = Number(m.match_duration_minutes) || ((Number(m.half_duration_minutes) || 6) * 2);
+                    const halfMinutes = Number(m.half_duration_minutes) || Math.max(1, Math.round(totalMatchMinutes / 2));
+
                     return {
                         id: m.id,
                         edition: edYear,
@@ -1452,10 +1491,13 @@
                         status: stateMap[normalizedDbStatus] || "SCHEDULED",
                         period: periodMap[normalizedDbStatus] || "FIRST_HALF",
                         elapsedSeconds: 0,
-                        halfDurationSeconds: (m.half_duration_minutes || 7) * 60,
+                        matchDurationMinutes: totalMatchMinutes,
+                        halfDurationSeconds: halfMinutes * 60,
                         timerRunning: false,
                         homeTeamId: m.home_team_id,
                         awayTeamId: m.away_team_id,
+                        homeLabel: m.home_label || "",
+                        awayLabel: m.away_label || "",
                         homeScore: result?.home_score ?? 0,
                         awayScore: result?.away_score ?? 0,
                         scorekeeperId: m.scorekeeper_id || null,
@@ -3274,7 +3316,7 @@
                             </div>
 
                             <div class="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-3">
-                                <span>${m.category}</span>
+                                <span>${m.category} • ${m.matchDurationMinutes || 12} mins</span>
                                 ${desc.isPendingQualification ? `<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 font-semibold">Pending Qualification</span>` : ""}
                             </div>
 
@@ -3283,7 +3325,7 @@
                                 <div class="flex items-center justify-between">
                                     <div class="flex items-center gap-2.5">
                                         <span class="w-3 h-3 rounded-full shrink-0" style="background:${home.color}"></span>
-                                        <span class="font-semibold ${home.isPending ? 'text-slate-500 italic' : 'text-white'} text-sm sm:text-base">${home.name}</span>
+                                        <span class="font-semibold ${home.isPending ? 'text-slate-500 italic text-xs sm:text-sm' : 'text-white text-sm sm:text-base'}">${home.name}</span>
                                     </div>
                                     <span class="font-sport text-2xl font-bold ${m.homeScore > m.awayScore ? 'text-gold-400' : 'text-white'}">${m.status === 'SCHEDULED' ? '-' : m.homeScore}</span>
                                 </div>
@@ -3291,7 +3333,7 @@
                                 <div class="flex items-center justify-between">
                                     <div class="flex items-center gap-2.5">
                                         <span class="w-3 h-3 rounded-full shrink-0" style="background:${away.color}"></span>
-                                        <span class="font-semibold ${away.isPending ? 'text-slate-500 italic' : 'text-white'} text-sm sm:text-base">${away.name}</span>
+                                        <span class="font-semibold ${away.isPending ? 'text-slate-500 italic text-xs sm:text-sm' : 'text-white text-sm sm:text-base'}">${away.name}</span>
                                     </div>
                                     <span class="font-sport text-2xl font-bold ${m.awayScore > m.homeScore ? 'text-gold-400' : 'text-white'}">${m.status === 'SCHEDULED' ? '-' : m.awayScore}</span>
                                 </div>
@@ -3661,14 +3703,14 @@
                 }
                 const selectedCat = MatchEngine.selectedCategoryFilter;
 
-                // Always keep knockout matches (Match 13–19 & other knockout rounds) visible
+                // Filter matches by category when selected, while keeping all 19 matches visible under "ALL"
                 const filteredMatches = selectedCat === "ALL"
                     ? allMatches
-                    : allMatches.filter(m => m.category === selectedCat || MatchEngine.isKnockoutRound(m.roundName || m.stage, m.matchNumberRaw));
+                    : allMatches.filter(m => m.category === selectedCat);
 
                 const knockoutMatches = allMatches.filter(m =>
                     MatchEngine.isKnockoutRound(m.roundName || m.stage, m.matchNumberRaw) &&
-                    (selectedCat === "ALL" || m.category === selectedCat || (Number(m.matchNumberRaw) >= 13 && Number(m.matchNumberRaw) <= 19))
+                    (selectedCat === "ALL" || m.category === selectedCat)
                 );
 
                 return `
@@ -3681,7 +3723,7 @@
                             <div class="flex flex-wrap items-center gap-2">
                                 <select onchange="MatchEngine.selectedCategoryFilter=this.value; App.renderCurrentPage()"
                                     class="bg-navy-900 border border-white/15 rounded-xl px-3.5 py-2 text-xs font-semibold text-white">
-                                    <option value="ALL" ${selectedCat === "ALL" ? "selected" : ""}>All Categories</option>
+                                    <option value="ALL" ${selectedCat === "ALL" ? "selected" : ""}>All Categories (${allMatches.length})</option>
                                     ${categories.map(c => `<option value="${c}" ${selectedCat === c ? "selected" : ""}>${c}</option>`).join("")}
                                 </select>
                                 ${AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"]) ? `
@@ -3697,7 +3739,7 @@
                             <section class="sport-card p-6 rounded-2xl">
                                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                                     <div>
-                                        <h2 class="font-sport text-2xl font-bold text-white"><i class="fa-solid fa-trophy text-gold-400 mr-2"></i>Knockout Bracket Pathway (Match 13–19)</h2>
+                                        <h2 class="font-sport text-2xl font-bold text-white"><i class="fa-solid fa-trophy text-gold-400 mr-2"></i>Knockout Bracket Pathway (Matches 13–19)</h2>
                                         <p class="text-xs text-slate-400">Nama pasukan dikemas kini secara automatik selepas keputusan Pool dan Semi Final disahkan FINAL.</p>
                                     </div>
                                 </div>
@@ -3715,7 +3757,7 @@
                                                         <span>Match ${m.matchNumberRaw} • ${desc.isPendingQualification ? desc.pendingBanner : (m.roundName || m.stage)}</span>
                                                         <span class="px-2 py-0.5 rounded bg-white text-[10px] text-[#102C50] shrink-0">${m.status}</span>
                                                     </div>
-                                                    <div class="text-[11px] text-slate-500 mb-2.5">${m.category} • ${m.pitch} • ${m.kickoff}</div>
+                                                    <div class="text-[11px] text-slate-500 mb-2.5">${m.category} • ${m.pitch} • ${m.kickoff} (${m.matchDurationMinutes || 12} mins)</div>
                                                     <div class="space-y-1.5 text-sm">
                                                         <div class="flex justify-between items-center p-2.5 rounded-lg bg-white ${hWin ? 'ring-2 ring-amber-400 font-bold' : ''}">
                                                             <span class="${h.isPending ? 'text-slate-500 italic text-xs font-semibold' : 'font-semibold'}">${h.name}</span>
