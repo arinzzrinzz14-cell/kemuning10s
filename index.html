@@ -920,12 +920,39 @@
                 }
                 const db = SupabaseConfig.client;
                 const dbStatus = this.mapUiStatusToDbStatus(match.status, match.period);
-                const resultStatus = match.officialConfirmed
-                    ? "official"
-                    : (match.status === "CANCELLED" ? "cancelled" : "draft");
+                const resultStatus = match.status === "CANCELLED" ? "cancelled" : "draft";
                 const nowIso = new Date().toISOString();
 
-                // 1. Update `matches` status
+                // Official results must be published through the secure database RPC.
+                // Do not write official status directly from the browser.
+                if (match.officialConfirmed) {
+                    const { error: officialRpcError } = await db.rpc(
+                        "confirm_match_result_official",
+                        {
+                            p_match_id: match.id,
+                            p_home_score: Number(match.homeScore),
+                            p_away_score: Number(match.awayScore)
+                        }
+                    );
+
+                    if (officialRpcError) {
+                        console.error("Official Result RPC Error:", officialRpcError);
+                        UI.toast(
+                            "Gagal menerbitkan keputusan rasmi: " + officialRpcError.message,
+                            "error"
+                        );
+                        return false;
+                    }
+
+                    if (!options.silent) {
+                        AuthManager.logAudit(
+                            `Official Result Published: Match ${match.matchNo} (${match.homeScore}-${match.awayScore})`
+                        );
+                    }
+                    return true;
+                }
+
+                // 1. Update `matches` status for non-official draft/live saves only.
                 const { error: matchUpdateError } = await db
                     .from("matches")
                     .update({ status: dbStatus })
@@ -1396,9 +1423,14 @@
                                 UI.closeModal();
                                 const saved = await this.persistMatchStateToSupabase(match);
                                 if (saved) {
-                                    await this.syncKnockoutQualificationFromStandings(match.edition, { persistToDb: true, silent: true });
+                                    // Refresh local qualification display only. Database writes
+                                    // must be handled by the dedicated secure qualification RPC.
+                                    await this.syncKnockoutQualificationFromStandings(
+                                        match.edition,
+                                        { persistToDb: false, silent: true }
+                                    );
                                     App.renderCurrentPage();
-                                    UI.toast(`Match ${match.matchNo} disahkan secara rasmi & slot kosong knockout dikemas kini!`, "success");
+                                    UI.toast(`Match ${match.matchNo} berjaya diterbitkan sebagai keputusan rasmi.`, "success");
                                 } else {
                                     App.renderCurrentPage();
                                 }
