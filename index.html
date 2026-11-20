@@ -1029,7 +1029,10 @@
             },
 
             mapUiStatusToDbStatus(status, period) {
-                if (status === "FINAL" || period === "FULL_TIME") return "full_time";
+                // Draft-score RPC accepts only scheduled/live/half_time.
+                // A finished-but-not-yet-official result remains a draft, so keep
+                // the database match status at live until the official RPC publishes it.
+                if (status === "FINAL" || period === "FULL_TIME") return "live";
                 if (period === "HALF_TIME" || status === "HALF_TIME") return "half_time";
                 if (status === "LIVE") return "live";
                 if (status === "CANCELLED") return "cancelled";
