@@ -392,6 +392,26 @@
                 font-size: 13px;
             }
         }
+
+        /* FINAL FIX: Dashboard > Teams name cell uses a dark surface with white text. */
+        #app-viewport table.dashboard-team-table tbody tr > td:first-child {
+            background-color: #12395B !important;
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+            font-weight: 900 !important;
+            opacity: 1 !important;
+            visibility: visible !important;
+        }
+        #app-viewport table.dashboard-team-table tbody tr > td:first-child,
+        #app-viewport table.dashboard-team-table tbody tr > td:first-child * {
+            color: #FFFFFF !important;
+            -webkit-text-fill-color: #FFFFFF !important;
+            opacity: 1 !important;
+            visibility: visible !important;
+        }
+        #app-viewport table.dashboard-team-table tbody tr > td:first-child {
+            border-bottom: 1px solid #6EA5C7 !important;
+        }
 </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-pitch-600 selection:text-white">
