@@ -1923,7 +1923,7 @@
                         String(match.adminReviewReason || "").startsWith("ADMIN RESET HOLD:");
 
                     // A deliberate Admin team reset remains empty across page reloads.
-                    // Only the explicit Auto-Advance action may release this hold.
+                    // Ordinary Auto-Advance must never release this hold; Admin must use Set Teams.
                     if (isAdminResetHold && options.releaseAdminResetHold !== true) {
                         match.adminReviewRequired = true;
                     } else if (isAdminResetHold && options.releaseAdminResetHold === true) {
@@ -2019,8 +2019,8 @@
                 return updatedCount;
             },
 
-            // Explicit Auto-Advance: Admin/Super Admin may release Admin Reset Hold;
-            // an assigned Scorekeeper may sync only after an official result is published.
+            // Explicit Auto-Advance fills eligible empty slots only.
+            // ADMIN RESET HOLD can only be cleared by a deliberate Admin Set Teams action.
             async advanceQualifiedTeams(categoryName) {
                 const isAdmin = AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"]);
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) {
@@ -2031,7 +2031,7 @@
                 const updatedCount = await this.syncKnockoutQualificationFromStandings(edYear, {
                     persistToDb: true,
                     silent: false,
-                    releaseAdminResetHold: isAdmin
+                    releaseAdminResetHold: false
                 });
                 const reviewMatches = this.matches.filter(m => String(m.edition) === String(edYear) && m.adminReviewRequired);
 
