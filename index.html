@@ -3827,7 +3827,29 @@
                 const button = document.getElementById("register-player-button");
                 if (button) { button.disabled = true; button.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Registering...'; }
                 let createdPlayerId = null;
+                let authDiagnostic = "Session: not checked";
                 try {
+                    // Temporary RLS diagnostic: confirm the Supabase session and matching profile.
+                    const { data: sessionData, error: sessionError } = await db.auth.getSession();
+                    const sessionUserId = sessionData?.session?.user?.id || null;
+                    authDiagnostic = `Session user ID: ${sessionUserId || "NONE"}`;
+                    if (sessionError) authDiagnostic += ` | Session error: ${sessionError.message}`;
+                    console.log("KEMUNING player registration SESSION:", { userId: sessionUserId, error: sessionError?.message || null });
+
+                    if (sessionUserId) {
+                        const { data: profileData, error: profileError } = await db
+                            .from("profiles")
+                            .select("id, role, is_active")
+                            .eq("id", sessionUserId)
+                            .maybeSingle();
+                        authDiagnostic += profileData
+                            ? ` | Profile role: ${profileData.role} | Active: ${profileData.is_active}`
+                            : ` | Profile: NOT FOUND${profileError ? ` (${profileError.message})` : ""}`;
+                        console.log("KEMUNING player registration PROFILE:", { profile: profileData, error: profileError?.message || null });
+                    } else {
+                        authDiagnostic += " | No authenticated Supabase session";
+                    }
+
                     const profileQ = await db.from("players").insert({ player_code: code, full_name: fullName }).select("id").single();
                     if (profileQ.error) throw profileQ.error;
                     createdPlayerId = profileQ.data.id;
@@ -3847,8 +3869,8 @@
                         const cleanup = await db.from("players").delete().eq("id", createdPlayerId);
                         if (cleanup.error) console.error("Player profile cleanup failed:", cleanup.error);
                     }
-                    console.error("Player registration failed:", error);
-                    UI.toast(error?.message || "Player registration failed.", "error");
+                    console.error("Player registration failed:", error, authDiagnostic);
+                    UI.toast(`${error?.message || "Player registration failed."} | ${authDiagnostic}`, "error");
                     if (button) { button.disabled = false; button.innerHTML = '<i class="fa-solid fa-user-plus mr-2"></i>Register Player'; }
                 }
             },
