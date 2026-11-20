@@ -2351,7 +2351,7 @@
                 const edYear = String(tournament.year);
                 const matchSelectColumns = "id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, match_duration_minutes, half_duration_minutes, home_team_id, away_team_id, home_label, away_label, scorekeeper_id, manual_override, admin_review_required, admin_review_reason";
 
-                const [catQ, teamQ, poolQ, matchQ, playerQ] = await Promise.all([
+                const [catQ, teamQ, poolQ, matchQ, playerQ, teamPlayerQ] = await Promise.all([
                     db.from("categories").select("*").eq("tournament_id", tournament.id).order("name"),
                     db.from("teams").select("*").eq("tournament_id", tournament.id).order("name"),
                     db.from("category_pool_teams").select("*").eq("tournament_id", tournament.id),
@@ -2359,10 +2359,13 @@
                         .select(matchSelectColumns)
                         .eq("tournament_id", tournament.id)
                         .order("match_number", { ascending: true }),
-                    db.from("players").select("*")
+                    db.from("players").select("*"),
+                    db.from("team_players")
+                        .select("player_id, team_id, tournament_id, category_id, jersey_number")
+                        .eq("tournament_id", tournament.id)
                 ]);
 
-                for (const q of [catQ, teamQ, poolQ, matchQ]) {
+                for (const q of [catQ, teamQ, poolQ, matchQ, playerQ, teamPlayerQ]) {
                     if (q.error) throw q.error;
                 }
 
@@ -2381,7 +2384,8 @@
                         matches = fallbackMatchQ.data;
                     }
                 }
-                const rawPlayers = (!playerQ.error && Array.isArray(playerQ.data)) ? playerQ.data : [];
+                const rawPlayers = Array.isArray(playerQ.data) ? playerQ.data : [];
+                const teamPlayerRows = Array.isArray(teamPlayerQ.data) ? teamPlayerQ.data : [];
 
                 const resultQ = matches.length
                     ? await db.from("match_results").select("match_id, home_score, away_score, status, confirmed_at, official_at").in("match_id", matches.map(m => m.id))
@@ -2526,26 +2530,31 @@
                     };
                 });
 
-                const mappedPlayers = rawPlayers
-                    .filter(p => !p.tournament_id || p.tournament_id === tournament.id)
-                    .map((p, idx) => {
-                        const matchedTeam = p.team_id ? teamById[p.team_id] : null;
+                const playersById = Object.fromEntries(rawPlayers.map(p => [p.id, p]));
+                const mappedPlayers = teamPlayerRows
+                    .map((membership, idx) => {
+                        const p = playersById[membership.player_id];
+                        if (!p) return null;
+                        const matchedTeam = teamById[membership.team_id] || null;
                         return {
                             id: p.id || `pl-${idx}`,
+                            playerCode: p.player_code || "",
                             edition: edYear,
-                            number: p.jersey_number ?? p.number ?? (idx + 1),
-                            name: p.full_name || p.name || p.display_name || "Registered Player",
-                            teamId: p.team_id || null,
+                            number: membership.jersey_number,
+                            name: p.full_name || "Registered Player",
+                            teamId: membership.team_id || null,
+                            categoryId: membership.category_id || null,
                             teamName: matchedTeam?.name || "Registered Squad",
-                            position: p.position || "Utility",
-                            tries: Number(p.tries) || 0,
-                            conversions: Number(p.conversions) || 0,
-                            penalties: Number(p.penalties) || 0,
-                            dropGoals: Number(p.drop_goals) || 0,
-                            yellowCards: Number(p.yellow_cards) || 0,
-                            redCards: Number(p.red_cards) || 0
+                            position: "Utility",
+                            tries: 0,
+                            conversions: 0,
+                            penalties: 0,
+                            dropGoals: 0,
+                            yellowCards: 0,
+                            redCards: 0
                         };
-                    });
+                    })
+                    .filter(Boolean);
 
                 TournamentStore.teams = TournamentStore.teams.filter(t => t.edition !== edYear).concat(mappedTeams);
                 TournamentStore.players = TournamentStore.players.filter(p => p.edition !== edYear).concat(mappedPlayers);
@@ -2888,6 +2897,7 @@
                     { id: "teams", label: "Teams & Registrations", icon: "fa-shield" },
                     { id: "categories", label: "Categories & Formats", icon: "fa-layer-group" },
                     { id: "users", label: "Official Accounts (Auth & Profiles)", icon: "fa-user-shield" },
+                    { id: "players_admin", label: "Manage Players", icon: "fa-users" },
                     { id: "matches_admin", label: "Match & Bracket Control", icon: "fa-sitemap" },
                     { id: "live_console", label: "Live Match Scorekeeper Console", icon: "fa-stopwatch" },
                     { id: "security", label: "Activity & Security Logs", icon: "fa-shield-halved" }
@@ -3170,6 +3180,8 @@
                     ${this.activeTab === "teams" ? this.renderAdmin("teams") : ""}
 
                     ${this.activeTab === "categories" ? this.renderAdmin("categories") : ""}
+
+                    ${this.activeTab === "players_admin" ? this.renderManagePlayers() : ""}
 
                     ${this.activeTab === "live_console" ? this.renderScorekeeper() : ""}
 
@@ -3739,13 +3751,122 @@
                 `;
             },
 
+            renderManagePlayers() {
+                if (!AuthManager.hasRole(["SUPER_ADMIN"])) return "";
+                const edYear = TournamentStore.activeEditionYear;
+                const tournament = TournamentStore.editions[edYear] || {};
+                const teams = TournamentStore.teams.filter(t => t.edition === edYear);
+                const players = TournamentStore.players.filter(p => p.edition === edYear);
+                return `
+                    <div class="space-y-6">
+                        <div>
+                            <h2 class="font-sport text-2xl font-bold text-white">Manage Players (${edYear})</h2>
+                            <p class="text-sm text-slate-400 mt-1">Register player profiles and assign them to a team. Access is restricted to Super Admin.</p>
+                        </div>
+                        <div class="sport-card p-5 sm:p-6 rounded-2xl">
+                            <form id="superadmin-player-form" onsubmit="event.preventDefault(); DashboardViews.registerPlayer();" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label for="player-code-input" class="block text-xs font-semibold text-slate-500 mb-1.5">Player Code *</label>
+                                    <input id="player-code-input" required maxlength="40" autocomplete="off" placeholder="e.g. KLS-U16-001" class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:border-pitch-500 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label for="player-name-input" class="block text-xs font-semibold text-slate-500 mb-1.5">Full Name *</label>
+                                    <input id="player-name-input" required maxlength="150" autocomplete="name" placeholder="Player full name" class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:border-pitch-500 focus:outline-none">
+                                </div>
+                                <div>
+                                    <label for="player-team-input" class="block text-xs font-semibold text-slate-500 mb-1.5">Team *</label>
+                                    <select id="player-team-input" required class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:border-pitch-500 focus:outline-none">
+                                        <option value="">Select team</option>
+                                        ${teams.map(t => `<option value="${Views.escapeHtml(t.id)}">${Views.escapeHtml(t.name)} — ${Views.escapeHtml(t.category || "")}</option>`).join("")}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="player-number-input" class="block text-xs font-semibold text-slate-500 mb-1.5">Jersey Number *</label>
+                                    <input id="player-number-input" type="number" required min="0" max="99" step="1" placeholder="e.g. 15" class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2.5 text-sm text-slate-900 focus:border-pitch-500 focus:outline-none">
+                                </div>
+                                <div class="md:col-span-2 flex flex-wrap items-center gap-3">
+                                    <button id="register-player-button" type="submit" class="px-5 py-2.5 rounded-xl bg-pitch-600 hover:bg-pitch-500 text-white text-sm font-bold transition"><i class="fa-solid fa-user-plus mr-2"></i>Register Player</button>
+                                    <span class="text-xs text-slate-500">Category is assigned automatically from the selected team. Position is not stored in the current database schema.</span>
+                                </div>
+                            </form>
+                        </div>
+                        <div class="sport-card rounded-2xl overflow-hidden">
+                            <div class="p-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                                <h3 class="font-bold text-white">Registered Players (${players.length})</h3>
+                                <button type="button" onclick="DashboardViews.refreshPlayersAdmin()" class="px-3 py-2 rounded-lg bg-navy-800 text-xs font-semibold text-slate-700 hover:bg-navy-700"><i class="fa-solid fa-rotate mr-1"></i>Refresh</button>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="w-full rugby-table text-left text-sm">
+                                    <thead><tr><th class="p-3">#</th><th class="p-3">Player Code</th><th class="p-3">Full Name</th><th class="p-3">Team</th><th class="p-3">Category</th></tr></thead>
+                                    <tbody>
+                                        ${players.length ? players.map((p, i) => `<tr><td class="p-3 text-slate-500">${i + 1}</td><td class="p-3 font-mono text-xs text-slate-600">${Views.escapeHtml(p.playerCode || "-")}</td><td class="p-3 font-semibold text-white">${Views.escapeHtml(p.name)}</td><td class="p-3 text-slate-600">${Views.escapeHtml(p.teamName)}</td><td class="p-3 text-slate-600">${Views.escapeHtml(teams.find(t => t.id === p.teamId)?.category || "-")}</td></tr>`).join("") : `<tr><td colspan="5" class="p-5 text-center text-slate-500">No players registered for this tournament yet.</td></tr>`}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            },
+
+            async registerPlayer() {
+                if (!AuthManager.hasRole(["SUPER_ADMIN"])) {
+                    UI.toast("Only Super Admin can register players.", "error");
+                    return;
+                }
+                const db = SupabaseConfig.client;
+                const code = (document.getElementById("player-code-input")?.value || "").trim();
+                const fullName = (document.getElementById("player-name-input")?.value || "").trim();
+                const teamId = document.getElementById("player-team-input")?.value || "";
+                const jerseyNumber = Number(document.getElementById("player-number-input")?.value);
+                const team = TournamentStore.teams.find(t => t.id === teamId && t.edition === TournamentStore.activeEditionYear);
+                const tournament = TournamentStore.editions[TournamentStore.activeEditionYear] || {};
+                if (!db || !code || !fullName || !team || !Number.isInteger(jerseyNumber) || jerseyNumber < 0 || jerseyNumber > 99 || !team.categoryId || !tournament.id) {
+                    UI.toast("Please complete all fields and select a valid team.", "warning");
+                    return;
+                }
+                const button = document.getElementById("register-player-button");
+                if (button) { button.disabled = true; button.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Registering...'; }
+                let createdPlayerId = null;
+                try {
+                    const profileQ = await db.from("players").insert({ player_code: code, full_name: fullName }).select("id").single();
+                    if (profileQ.error) throw profileQ.error;
+                    createdPlayerId = profileQ.data.id;
+                    const membershipQ = await db.from("team_players").insert({
+                        player_id: createdPlayerId,
+                        team_id: team.id,
+                        tournament_id: tournament.id,
+                        category_id: team.categoryId,
+                        jersey_number: jerseyNumber
+                    });
+                    if (membershipQ.error) throw membershipQ.error;
+                    await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
+                    UI.toast(`${fullName} registered successfully for ${team.name}.`, "success");
+                    App.renderCurrentPage();
+                } catch (error) {
+                    if (createdPlayerId) {
+                        const cleanup = await db.from("players").delete().eq("id", createdPlayerId);
+                        if (cleanup.error) console.error("Player profile cleanup failed:", cleanup.error);
+                    }
+                    console.error("Player registration failed:", error);
+                    UI.toast(error?.message || "Player registration failed.", "error");
+                    if (button) { button.disabled = false; button.innerHTML = '<i class="fa-solid fa-user-plus mr-2"></i>Register Player'; }
+                }
+            },
+
+            async refreshPlayersAdmin() {
+                if (!AuthManager.hasRole(["SUPER_ADMIN"])) return;
+                await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
+                App.renderCurrentPage();
+                UI.toast("Player list refreshed from Supabase.", "success");
+            },
+
             async switchTab(tabId) {
                 this.activeTab = tabId;
                 if (tabId === "users" && AuthManager.hasRole(["SUPER_ADMIN"])) {
                     await AuthManager.fetchOfficialProfiles();
                 } else if (tabId === "tournaments" && AuthManager.hasRole(["SUPER_ADMIN"])) {
                     await SupabaseData.loadAllTournamentsList();
-                } else if (["teams", "categories", "fixtures", "matches_admin"].includes(tabId)) {
+                } else if (["teams", "categories", "fixtures", "matches_admin", "players_admin"].includes(tabId)) {
                     await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
                 }
                 App.renderCurrentPage();
@@ -4687,7 +4808,7 @@
                                                 ${t.short}
                                             </div>
                                             <div>
-                                                <button type="button" data-team-profile="${t.id}" class="font-bold text-white text-base text-left hover:text-pitch-400 focus:text-pitch-400 focus:outline-none focus:underline transition" aria-label="View ${t.name} team profile">${t.name} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-70"></i></button>
+                                                <button type="button" data-team-profile="${t.id}" class="font-bold text-[#102C50] text-base text-left hover:text-pitch-700 focus:text-pitch-700 focus:outline-none focus:underline transition" aria-label="View ${t.name} team profile">${t.name} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-70"></i></button>
                                                 <div class="text-xs text-slate-400"><span class="text-pitch-400 font-semibold">${t.pool}</span> • ${t.category}</div>
                                             </div>
                                         </div>
