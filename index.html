@@ -818,6 +818,54 @@
                     .subscribe(status => console.info("KEMUNING Realtime:", status));
             },
 
+            async syncLiveDataFromSupabase() {
+                const db = SupabaseConfig.client;
+                const ids = this.matches.map(m => m.id).filter(Boolean);
+                if (!db || !ids.length || this.syncingLiveData) return;
+                this.syncingLiveData = true;
+                try {
+                    const [resultsQ, clocksQ] = await Promise.all([
+                        db.from("match_results").select("match_id, home_score, away_score, status").in("match_id", ids),
+                        db.from("match_clock_states").select("match_id, elapsed_seconds, period, timer_running, updated_at").in("match_id", ids)
+                    ]);
+                    if (resultsQ.error) throw resultsQ.error;
+                    if (clocksQ.error) throw clocksQ.error;
+                    let changed = false;
+                    for (const row of resultsQ.data || []) {
+                        const match = this.matches.find(m => m.id === row.match_id);
+                        if (!match) continue;
+                        const home = this.parseStrictScore(row.home_score);
+                        const away = this.parseStrictScore(row.away_score);
+                        if (home !== null && home !== match.homeScore) { match.homeScore = home; changed = true; }
+                        if (away !== null && away !== match.awayScore) { match.awayScore = away; changed = true; }
+                        const official = String(row.status || "").toLowerCase() === "official";
+                        if (official !== Boolean(match.officialConfirmed)) { match.officialConfirmed = official; changed = true; }
+                        if (official && match.status !== "FINAL") { match.status = "FINAL"; match.period = "FULL_TIME"; match.timerRunning = false; changed = true; }
+                    }
+                    for (const row of clocksQ.data || []) {
+                        const match = this.matches.find(m => m.id === row.match_id);
+                        if (!match) continue;
+                        const elapsed = this.clockElapsedFromRow(row);
+                        const running = Boolean(row.timer_running) && !["HALF_TIME", "FULL_TIME"].includes(row.period);
+                        if (Math.abs((Number(match.elapsedSeconds) || 0) - elapsed) > 2 || match.period !== row.period || Boolean(match.timerRunning) !== running) {
+                            this.applyClockRow(row, false);
+                            changed = true;
+                        }
+                    }
+                    if (changed) App.renderCurrentPage();
+                } catch (err) {
+                    console.warn("Live data sync fallback:", err?.message || err);
+                } finally {
+                    this.syncingLiveData = false;
+                }
+            },
+
+            startLiveDataPolling() {
+                if (this.liveDataPollInterval) clearInterval(this.liveDataPollInterval);
+                this.liveDataPollInterval = setInterval(() => this.syncLiveDataFromSupabase(), 3000);
+                this.syncLiveDataFromSupabase();
+            },
+
             formatClock(totalSeconds) {
                 const safeSecs = Math.max(0, Number(totalSeconds) || 0);
                 const mins = Math.floor(safeSecs / 60);
@@ -4610,7 +4658,7 @@
                                                 ${t.short}
                                             </div>
                                             <div>
-                                                <button type="button" onclick="App.openTeamProfile('${t.id}')" class="font-bold text-white text-base text-left hover:text-pitch-400 focus:text-pitch-400 focus:outline-none focus:underline transition" aria-label="View ${t.name} team profile">${t.name} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-70"></i></button>
+                                                <button type="button" data-team-profile="${t.id}" class="font-bold text-white text-base text-left hover:text-pitch-400 focus:text-pitch-400 focus:outline-none focus:underline transition" aria-label="View ${t.name} team profile">${t.name} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-70"></i></button>
                                                 <div class="text-xs text-slate-400"><span class="text-pitch-400 font-semibold">${t.pool}</span> • ${t.category}</div>
                                             </div>
                                         </div>
@@ -5341,7 +5389,10 @@
                     }
                 }
                 MatchEngine.startGlobalTicker();
-                if (connected) MatchEngine.subscribeRealtime();
+                if (connected) {
+                    MatchEngine.subscribeRealtime();
+                    MatchEngine.startLiveDataPolling();
+                }
                 this.updateHeaderAuth();
 
                 const initialHash = window.location.hash.replace("#", "");
@@ -5579,6 +5630,12 @@
 
         // Boot Application on Window Load
         window.addEventListener("DOMContentLoaded", () => {
+            document.addEventListener("click", event => {
+                const teamButton = event.target.closest("[data-team-profile]");
+                if (!teamButton) return;
+                event.preventDefault();
+                App.openTeamProfile(teamButton.getAttribute("data-team-profile"));
+            });
             App.init();
         });
     </script>
