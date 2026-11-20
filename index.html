@@ -3297,7 +3297,7 @@
                                             <tbody>
                                                 ${teams.length === 0 ? `<tr><td colspan="4" class="p-4 text-center text-slate-400">No teams registered yet.</td></tr>` : teams.map(t => `
                                                     <tr>
-                                                        <td class="p-3 font-semibold text-white">${t.name} <span class="text-xs text-slate-400">(${t.short})</span></td>
+                                                        <td class="p-3 font-semibold" style="background:#FFFFFF !important;color:#102C50 !important;-webkit-text-fill-color:#102C50 !important;font-weight:900 !important;opacity:1 !important;visibility:visible !important;"><span style="color:#102C50 !important;-webkit-text-fill-color:#102C50 !important;font-weight:900 !important;">${t.name}</span> <span style="color:#36536E !important;-webkit-text-fill-color:#36536E !important;font-size:12px !important;">(${t.short})</span></td>
                                                         <td class="p-3 text-xs text-slate-300">${t.category}</td>
                                                         <td class="p-3"><span class="px-2 py-0.5 rounded bg-pitch-800/50 text-pitch-300 text-xs font-bold">${t.pool}</span></td>
                                                         <td class="p-3 text-slate-300 text-xs">${t.coach}</td>
