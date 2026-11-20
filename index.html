@@ -3820,39 +3820,35 @@
                 const jerseyNumber = Number(document.getElementById("player-number-input")?.value);
                 const team = TournamentStore.teams.find(t => t.id === teamId && t.edition === TournamentStore.activeEditionYear);
                 const tournament = TournamentStore.editions[TournamentStore.activeEditionYear] || {};
-                if (!db || !code || !fullName || !team || !Number.isInteger(jerseyNumber) || jerseyNumber < 0 || jerseyNumber > 99 || !team.categoryId || !tournament.id) {
-                    UI.toast("Please complete all fields and select a valid team.", "warning");
+                if (!db || !fullName || !team || !Number.isInteger(jerseyNumber) || jerseyNumber < 0 || jerseyNumber > 99 || !team.categoryId || !tournament.id) {
+                    UI.toast("Please complete all required fields and select a valid team.", "warning");
                     return;
                 }
                 const button = document.getElementById("register-player-button");
                 if (button) { button.disabled = true; button.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i>Registering...'; }
                 let createdPlayerId = null;
-                let authDiagnostic = "Session: not checked";
                 try {
-                    // Temporary RLS diagnostic: confirm the Supabase session and matching profile.
                     const { data: sessionData, error: sessionError } = await db.auth.getSession();
-                    const sessionUserId = sessionData?.session?.user?.id || null;
-                    authDiagnostic = `Session user ID: ${sessionUserId || "NONE"}`;
-                    if (sessionError) authDiagnostic += ` | Session error: ${sessionError.message}`;
-                    console.log("KEMUNING player registration SESSION:", { userId: sessionUserId, error: sessionError?.message || null });
-
-                    if (sessionUserId) {
-                        const { data: profileData, error: profileError } = await db
-                            .from("profiles")
-                            .select("id, role, is_active")
-                            .eq("id", sessionUserId)
-                            .maybeSingle();
-                        authDiagnostic += profileData
-                            ? ` | Profile role: ${profileData.role} | Active: ${profileData.is_active}`
-                            : ` | Profile: NOT FOUND${profileError ? ` (${profileError.message})` : ""}`;
-                        console.log("KEMUNING player registration PROFILE:", { profile: profileData, error: profileError?.message || null });
-                    } else {
-                        authDiagnostic += " | No authenticated Supabase session";
+                    if (sessionError || !sessionData?.session?.access_token || !sessionData?.session?.user?.id) {
+                        throw new Error(sessionError?.message || "Active authenticated session is missing.");
                     }
 
-                    const profileQ = await db.from("players").insert({ player_code: code, full_name: fullName }).select("id").single();
+                    const playerId = (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+                        ? crypto.randomUUID()
+                        : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+                            const r = (Math.random() * 16) | 0;
+                            const v = c === "x" ? r : ((r & 0x3) | 0x8);
+                            return v.toString(16);
+                        });
+
+                    const insertPayload = { id: playerId, full_name: fullName };
+                    if (code) insertPayload.player_code = code;
+
+                    // Omit .select().single() so PostgREST does not run a returning SELECT under RLS.
+                    const profileQ = await db.from("players").insert(insertPayload);
                     if (profileQ.error) throw profileQ.error;
-                    createdPlayerId = profileQ.data.id;
+                    createdPlayerId = playerId;
+
                     const membershipQ = await db.from("team_players").insert({
                         player_id: createdPlayerId,
                         team_id: team.id,
@@ -3861,6 +3857,7 @@
                         jersey_number: jerseyNumber
                     });
                     if (membershipQ.error) throw membershipQ.error;
+
                     await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
                     UI.toast(`${fullName} registered successfully for ${team.name}.`, "success");
                     App.renderCurrentPage();
@@ -3869,8 +3866,8 @@
                         const cleanup = await db.from("players").delete().eq("id", createdPlayerId);
                         if (cleanup.error) console.error("Player profile cleanup failed:", cleanup.error);
                     }
-                    console.error("Player registration failed:", error, authDiagnostic);
-                    UI.toast(`${error?.message || "Player registration failed."} | ${authDiagnostic}`, "error");
+                    console.error("Player registration failed:", error);
+                    UI.toast(error?.message || "Player registration failed.", "error");
                     if (button) { button.disabled = false; button.innerHTML = '<i class="fa-solid fa-user-plus mr-2"></i>Register Player'; }
                 }
             },
@@ -4553,11 +4550,10 @@
                         <div class="pt-3 border-t border-white/10 flex items-center justify-between text-xs text-slate-400">
                             <span><i class="fa-solid fa-location-dot text-pitch-400 mr-1"></i>${m.pitch}</span>
                             ${showDetailBtn ? `
-                                <button onclick="MatchEngine.selectedMatchId='${m.id}'; App.navigate('matchdetails')"
-                                    class="text-pitch-400 hover:text-pitch-300 font-semibold flex items-center gap-1">
-                                    Match Center <i class="fa-solid fa-arrow-right text-[10px]"></i>
+                                <button onclick="App.openMatchDetail('${m.id}')" class="text-pitch-400 hover:text-pitch-300 font-semibold">
+                                    Match Center <i class="fa-solid fa-arrow-right ml-1"></i>
                                 </button>
-                            ` : ''}
+                            ` : ""}
                         </div>
                     </div>
                 `;
@@ -4565,1251 +4561,79 @@
 
             renderEventTimeline(match) {
                 if (!match.events || match.events.length === 0) {
-                    return `<div class="p-6 text-center rounded-xl bg-navy-950/60 border border-white/5 text-slate-400 text-sm">Official score synced with Supabase (${match.homeScore} - ${match.awayScore}). Detailed timeline events will appear here when logged during the session.</div>`;
+                    return `<div class="p-4 rounded-xl bg-navy-950/60 border border-white/5 text-xs text-slate-400 text-center">No scoring or card events recorded yet.</div>`;
                 }
+                const badgeMap = {
+                    TRY: "bg-pitch-600/30 text-pitch-300 border-pitch-500/40",
+                    CONVERSION: "bg-sky-500/20 text-sky-300 border-sky-500/40",
+                    PENALTY: "bg-gold-500/20 text-gold-300 border-gold-500/40",
+                    DROP_GOAL: "bg-purple-500/20 text-purple-300 border-purple-500/40",
+                    YELLOW_CARD: "bg-yellow-500/20 text-yellow-300 border-yellow-500/40",
+                    RED_CARD: "bg-red-500/20 text-red-300 border-red-500/40"
+                };
 
                 return `
                     <div class="space-y-2">
-                        ${match.events.slice().reverse().map(ev => {
-                            const badgeStyle = ev.type === "TRY" ? "bg-pitch-600/30 text-pitch-700 border-pitch-500/40"
-                                : ev.type === "YELLOW_CARD" ? "bg-yellow-500/20 text-yellow-700 border-yellow-500/40"
-                                : ev.type === "RED_CARD" ? "bg-red-500/20 text-red-700 border-red-500/40"
-                                : "bg-sky-500/20 text-sky-700 border-sky-500/40";
-                            return `
-                                <div class="flex items-center justify-between p-3 rounded-xl bg-navy-950/80 border border-white/10 text-xs sm:text-sm">
-                                    <div class="flex items-center gap-3">
-                                        <span class="font-sport font-bold text-gold-400 text-base w-12">${ev.time}'</span>
-                                        <span class="px-2 py-0.5 rounded border text-[11px] font-bold ${badgeStyle}">${ev.type.replace("_", " ")}</span>
-                                        <div>
-                                            <div class="font-semibold text-white">${ev.player}</div>
-                                            <div class="text-xs text-slate-400">${ev.team} • ${ev.period}</div>
-                                        </div>
-                                    </div>
-                                    <div class="font-sport font-bold text-lg ${ev.points > 0 ? 'text-pitch-400' : 'text-slate-500'}">
-                                        ${ev.points > 0 ? '+' + ev.points : ''}
+                        ${match.events.slice().reverse().map(ev => `
+                            <div class="flex items-center justify-between p-3 rounded-xl bg-navy-950/80 border border-white/10 text-xs gap-3">
+                                <div class="flex items-center gap-3">
+                                    <span class="font-mono font-bold text-gold-400">${ev.time}</span>
+                                    <span class="px-2 py-0.5 rounded border text-[10px] font-bold ${badgeMap[ev.type] || 'bg-navy-800 text-slate-300'}">${ev.type.replace("_", " ")}</span>
+                                    <div>
+                                        <span class="font-semibold text-white">${ev.team}</span>
+                                        <span class="text-slate-400"> • ${ev.player}</span>
                                     </div>
                                 </div>
-                            `;
-                        }).join("")}
+                                <span class="font-sport font-bold text-sm ${ev.points > 0 ? 'text-pitch-400' : 'text-slate-400'}">${ev.points > 0 ? `+${ev.points} PTS` : ev.period}</span>
+                            </div>
+                        `).join("")}
                     </div>
                 `;
             },
 
-            /* 1. HOME PAGE */
             renderHome() {
                 const edYear = TournamentStore.activeEditionYear;
-                const edition = TournamentStore.editions[edYear] || { year: edYear, name: `KEMUNING 10s ${edYear}`, categories: [], dates: "", venue: "", description: "" };
+                const edition = TournamentStore.editions[edYear] || { categories: [] };
                 const teams = TournamentStore.teams.filter(t => t.edition === edYear);
                 const matches = MatchEngine.matches.filter(m => m.edition === edYear);
                 const liveMatches = matches.filter(m => m.status === "LIVE");
-                const upcomingMatches = matches
-                    .filter(m => !["LIVE", "FINAL", "CANCELLED"].includes(m.status))
-                    .slice(0, 6);
-
-                const firstCategory = (edition.categories && edition.categories[0]?.name) ||
-                    [...new Set(teams.map(t => t.category).filter(Boolean))][0] || "";
-                const standings = firstCategory ? MatchEngine.computeStandings(edYear, firstCategory).slice(0, 6) : [];
+                const upcomingMatches = matches.filter(m => m.status === "SCHEDULED").slice(0, 3);
+                const firstCategory = edition.categories?.[0]?.name || "Open";
+                const standings = MatchEngine.computeStandings(edYear, firstCategory, "ALL").slice(0, 4);
 
                 return `
                     <div class="space-y-10">
                         <!-- Hero Section -->
-                        <section class="relative overflow-hidden rounded-3xl pitch-gradient border border-pitch-500/30 p-6 sm:p-10 lg:p-12 shadow-2xl">
+                        <section class="relative rounded-3xl overflow-hidden pitch-gradient border border-pitch-500/30 p-6 sm:p-10 lg:p-12 shadow-2xl">
                             <div class="relative z-10 max-w-3xl">
-                                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-navy-950/90 text-pitch-400 text-xs font-bold tracking-wider mb-4">
-                                    <i class="fa-solid fa-trophy text-gold-400"></i>
-                                    <span data-i18n="hero_tag">${App.t("hero_tag")}</span> • ${edition.year}
+                                <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-navy-950/70 border border-white/15 text-xs font-bold text-gold-400 uppercase tracking-wider mb-4">
+                                    <i class="fa-solid fa-trophy"></i> ${App.t("hero_tag")} • ${edition.name}
                                 </div>
-                                <h1 class="font-sport text-4xl sm:text-5xl lg:text-6xl font-bold text-white tracking-tight leading-none mb-4">
-                                    ${edition.name}
+                                <h1 class="font-sport text-4xl sm:text-6xl font-bold text-white leading-none tracking-tight mb-4">
+                                    ${App.t("hero_title")}
                                 </h1>
-                                <p class="text-white/90 text-base sm:text-lg mb-6 leading-relaxed">
-                                    ${edition.description || "Official KEMUNING 10s Rugby Tournament Live Operations, Fixtures, Standings & Results."}
+                                <p class="text-slate-100/90 text-sm sm:text-base max-w-2xl leading-relaxed mb-6">
+                                    ${edition.description || App.t("footer_desc")}
                                 </p>
-                                <div class="flex flex-wrap items-center gap-4 text-xs sm:text-sm text-white/95 mb-8 font-medium">
-                                    <span><i class="fa-regular fa-calendar text-gold-400 mr-1.5"></i>${edition.dates}</span>
-                                    <span><i class="fa-solid fa-location-dot mr-1.5"></i>${edition.venue}</span>
-                                </div>
                                 <div class="flex flex-wrap gap-3">
-                                    <button onclick="App.navigate('livescores')" class="px-6 py-3 rounded-xl gold-gradient text-white font-bold text-sm shadow-lg flex items-center gap-2 transition">
-                                        <span class="relative flex h-2.5 w-2.5"><span class="live-dot relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span></span>
-                                        <span data-i18n="hero_cta_live">${App.t("hero_cta_live")}</span>
+                                    <button onclick="App.navigate('livescores')" class="px-5 py-3 rounded-xl bg-navy-950 hover:bg-navy-900 text-white font-bold text-sm border border-white/15 shadow-lg transition flex items-center gap-2">
+                                        <span class="w-2.5 h-2.5 rounded-full bg-red-500 live-dot"></span> ${App.t("hero_cta_live")}
                                     </button>
-                                    <button onclick="App.navigate('fixtures')" class="px-6 py-3 rounded-xl bg-white text-[#102C50] font-bold text-sm shadow transition" data-i18n="hero_cta_fixtures">
-                                        ${App.t("hero_cta_fixtures")}
+                                    <button onclick="App.navigate('fixtures')" class="px-5 py-3 rounded-xl gold-gradient text-white font-bold text-sm shadow-lg hover:opacity-95 transition flex items-center gap-2">
+                                        <i class="fa-solid fa-calendar-days"></i> ${App.t("hero_cta_fixtures")}
+                                    </button>
+                                    <button onclick="App.navigate('overview')" class="px-5 py-3 rounded-xl bg-white/10 hover:bg-white/15 text-white font-semibold text-sm border border-white/20 transition">
+                                        ${App.t("nav_overview")}
                                     </button>
                                 </div>
                             </div>
                         </section>
 
-                        <!-- Tournament Key Metrics -->
+                        <!-- Quick KPI Strip -->
                         <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
                             <div class="sport-card p-5 rounded-2xl">
-                                <div class="text-xs text-slate-400 uppercase font-semibold" data-i18n="stat_teams">${App.t("stat_teams")}</div>
+                                <div class="text-xs text-slate-400 uppercase font-semibold">${App.t("stat_teams")}</div>
                                 <div class="font-sport text-3xl sm:text-4xl font-bold text-white mt-1">${teams.length}</div>
+                                <div class="text-xs text-pitch-400 mt-1">${edYear} Edition</div>
                             </div>
-                            <div class="sport-card p-5 rounded-2xl">
-                                <div class="text-xs text-slate-400 uppercase font-semibold" data-i18n="stat_categories">${App.t("stat_categories")}</div>
-                                <div class="font-sport text-3xl sm:text-4xl font-bold text-pitch-400 mt-1">${(edition.categories || []).length}</div>
-                            </div>
-                            <div class="sport-card p-5 rounded-2xl">
-                                <div class="text-xs text-slate-400 uppercase font-semibold" data-i18n="stat_matches">${App.t("stat_matches")}</div>
-                                <div class="font-sport text-3xl sm:text-4xl font-bold text-white mt-1">${matches.length}</div>
-                            </div>
-                            <div class="sport-card p-5 rounded-2xl">
-                                <div class="text-xs text-slate-400 uppercase font-semibold" data-i18n="stat_pitches">${App.t("stat_pitches")}</div>
-                                <div class="font-sport text-3xl sm:text-4xl font-bold text-gold-400 mt-1">${[...new Set(matches.map(m => m.pitch).filter(Boolean))].length || 1}</div>
-                            </div>
-                        </section>
-
-                        <!-- Live Matches Showcase -->
-                        <section>
-                            <div class="flex items-center justify-between mb-4">
-                                <h2 class="font-sport text-2xl sm:text-3xl font-bold text-white flex items-center gap-2.5">
-                                    <span class="relative flex h-3 w-3"><span class="live-dot relative inline-flex rounded-full h-3 w-3 bg-red-500"></span></span>
-                                    <span data-i18n="live_now_title">${App.t("live_now_title")}</span>
-                                </h2>
-                                <button onclick="App.navigate('livescores')" class="text-sm text-pitch-400 hover:underline font-semibold">Full Live Board &rarr;</button>
-                            </div>
-                            ${liveMatches.length > 0 ? `
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-                                    ${liveMatches.map(m => this.renderMatchCard(m)).join("")}
-                                </div>
-                            ` : `
-                                <div class="sport-card p-8 rounded-2xl text-center text-slate-400">No matches currently live in the ${edYear} edition.</div>
-                            `}
-                        </section>
-
-                        <!-- Standings Snapshot (Single Category Isolated) & Upcoming Fixtures -->
-                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                            <div class="lg:col-span-2 sport-card p-6 rounded-2xl">
-                                <div class="flex items-center justify-between mb-4">
-                                    <div>
-                                        <h3 class="font-sport text-2xl font-bold text-white">${firstCategory || "Category"} Standings (${edYear})</h3>
-                                        <p class="text-xs text-slate-400">Category-isolated preview • View all categories in Standings</p>
-                                    </div>
-                                    <button onclick="App.navigate('standings')" class="text-xs text-pitch-400 hover:underline font-semibold">All Categories &rarr;</button>
-                                </div>
-                                <div class="overflow-x-auto">
-                                    <table class="w-full rugby-table text-left text-sm">
-                                        <thead>
-                                            <tr>
-                                                <th class="p-2.5">#</th>
-                                                <th class="p-2.5">Team</th>
-                                                <th class="p-2.5">Pool</th>
-                                                <th class="p-2.5 text-center">P</th>
-                                                <th class="p-2.5 text-center">W</th>
-                                                <th class="p-2.5 text-center">PD</th>
-                                                <th class="p-2.5 text-center">PTS</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            ${standings.length === 0 ? `<tr><td colspan="7" class="p-4 text-center text-slate-400">No standings data yet.</td></tr>` : standings.map((row, idx) => `
-                                                <tr>
-                                                    <td class="p-2.5 font-bold text-slate-400">${idx + 1}</td>
-                                                    <td class="p-2.5 font-semibold text-white">${row.team.name}</td>
-                                                    <td class="p-2.5 text-xs text-slate-400">${row.team.pool}</td>
-                                                    <td class="p-2.5 text-center text-slate-300">${row.played}</td>
-                                                    <td class="p-2.5 text-center text-slate-300">${row.won}</td>
-                                                    <td class="p-2.5 text-center font-mono text-xs ${row.pd >= 0 ? 'text-emerald-600' : 'text-red-600'}">${row.pd >= 0 ? '+' + row.pd : row.pd}</td>
-                                                    <td class="p-2.5 text-center font-sport text-lg font-bold text-gold-400">${row.pts}</td>
-                                                </tr>
-                                            `).join("")}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-
-                            <div class="space-y-4">
-                                <div class="flex items-center justify-between">
-                                    <h3 class="font-sport text-2xl font-bold text-white" data-i18n="upcoming_title">${App.t("upcoming_title")}</h3>
-                                    <button onclick="App.navigate('fixtures')" class="text-xs text-pitch-400 hover:underline font-semibold">All &rarr;</button>
-                                </div>
-                                ${upcomingMatches.length > 0 ? upcomingMatches.map(m => this.renderMatchCard(m)).join("") : `<div class="sport-card p-6 rounded-2xl text-sm text-slate-400">No upcoming fixtures available.</div>`}
-                            </div>
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 2. TOURNAMENT OVERVIEW */
-            renderOverview() {
-                const ed = TournamentStore.editions[TournamentStore.activeEditionYear] || {};
-                return `
-                    <div class="space-y-6">
-                        <div class="sport-card p-6 sm:p-8 rounded-3xl">
-                            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-                                <span class="px-3 py-1 rounded-full bg-pitch-600/20 text-pitch-400 text-xs font-bold">EDITION ${ed.year} • ${ed.status}</span>
-                                <span class="text-xs text-slate-400">Organized by ${ed.organizer || "Kemuning Rugby Club"}</span>
-                            </div>
-                            <h1 class="font-sport text-3xl sm:text-4xl font-bold text-white mb-4">${ed.name}</h1>
-                            <p class="text-slate-300 leading-relaxed mb-6">${ed.description || "Official KEMUNING 10s Rugby Tournament."}</p>
-
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                                <div class="p-4 rounded-2xl bg-navy-950/80 border border-white/10">
-                                    <div class="text-xs text-slate-400 uppercase font-semibold">Tournament Dates</div>
-                                    <div class="text-white font-bold mt-1">${ed.dates || "TBD"}</div>
-                                </div>
-                                <div class="p-4 rounded-2xl bg-navy-950/80 border border-white/10">
-                                    <div class="text-xs text-slate-400 uppercase font-semibold">Host Venue</div>
-                                    <div class="text-white font-bold mt-1">${ed.venue || "TBD"}</div>
-                                </div>
-                                <div class="p-4 rounded-2xl bg-navy-950/80 border border-white/10">
-                                    <div class="text-xs text-slate-400 uppercase font-semibold">Competition Format</div>
-                                    <div class="text-white font-bold mt-1">10-a-Side Pool &amp; Knockout</div>
-                                </div>
-                            </div>
-
-                            <div class="p-5 rounded-2xl bg-navy-800 border border-pitch-500/30">
-                                <h3 class="font-bold text-pitch-400 text-sm uppercase tracking-wider mb-2"><i class="fa-solid fa-book-open mr-2"></i>Official Competition Regulations &amp; Points System</h3>
-                                <p class="text-sm text-slate-300 leading-relaxed">Mata: Menang 3, Seri 1, Kalah 0. Tiada mata bonus.</p>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 3. CATEGORIES */
-            renderCategories() {
-                const ed = TournamentStore.editions[TournamentStore.activeEditionYear] || { categories: [] };
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">Competition Categories (${ed.year})</h1>
-                            <p class="text-sm text-slate-400">Divisions, pool structures, qualifiers, and championship formats.</p>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            ${(ed.categories || []).length === 0 ? `<div class="sport-card p-8 rounded-2xl text-slate-400">No categories configured for ${ed.year}.</div>` : (ed.categories || []).map(cat => {
-                                const teamCount = TournamentStore.teams.filter(t => t.edition === ed.year && t.category === cat.name).length;
-                                return `
-                                    <div class="sport-card p-6 rounded-2xl flex flex-col justify-between">
-                                        <div>
-                                            <div class="flex items-center justify-between mb-3">
-                                                <span class="px-3 py-1 rounded-lg bg-pitch-600/25 text-pitch-400 font-sport font-bold text-base">${cat.code}</span>
-                                                <span class="text-xs text-gold-400 font-semibold">${cat.format}</span>
-                                            </div>
-                                            <h3 class="font-bold text-xl text-white mb-2">${cat.name}</h3>
-                                            <div class="space-y-2 text-sm border-t border-white/10 pt-3 mt-3">
-                                                <div class="flex justify-between"><span class="text-slate-400">Number of Pools:</span><span class="text-white font-semibold">${cat.numberOfPools}</span></div>
-                                                <div class="flex justify-between"><span class="text-slate-400">Teams per Pool:</span><span class="text-white font-semibold">${cat.teamsPerPool}</span></div>
-                                                <div class="flex justify-between"><span class="text-slate-400">Qualifiers per Pool:</span><span class="text-white font-semibold">${cat.qualifiersPerPool}</span></div>
-                                                <div class="flex justify-between"><span class="text-slate-400">Teams Entered:</span><span class="text-pitch-400 font-bold">${teamCount} Teams</span></div>
-                                            </div>
-                                        </div>
-                                        <button onclick="App.navigate('standings')" class="mt-6 w-full py-2.5 rounded-xl bg-pitch-600 hover:bg-pitch-500 text-white text-xs font-semibold transition">
-                                            View Category Standings
-                                        </button>
-                                    </div>
-                                `;
-                            }).join("")}
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 4. TEAMS */
-            renderTeams() {
-                const edYear = TournamentStore.activeEditionYear;
-                const teams = TournamentStore.teams.filter(t => t.edition === edYear);
-                return `
-                    <div class="space-y-6">
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                            <div>
-                                <h1 class="font-sport text-3xl font-bold text-white">Participating Teams (${edYear})</h1>
-                                <p class="text-sm text-slate-400">Official registered clubs, pool allocations, and team managers.</p>
-                            </div>
-                            <input type="text" id="team-search-input" onkeyup="App.filterList('team-card-item', this.value)" placeholder="Search team, category, or pool..."
-                                class="bg-navy-900 border border-white/15 rounded-xl px-4 py-2 text-sm text-white w-full sm:w-64 focus:border-pitch-500 focus:outline-none">
-                        </div>
-
-                        ${teams.length === 0 ? `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">No teams registered for ${edYear} yet.</div>` : `
-                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                                ${teams.map(t => `
-                                    <div class="team-card-item sport-card p-5 rounded-2xl" data-search="${(t.name + ' ' + t.pool + ' ' + t.category).toLowerCase()}">
-                                        <div class="flex items-center gap-3 mb-4">
-                                            <div class="w-12 h-12 rounded-xl flex items-center justify-center font-sport font-bold text-lg text-white shadow-lg" style="background:${t.color}">
-                                                ${t.short}
-                                            </div>
-                                            <div>
-                                                <button type="button" data-team-profile="${t.id}" class="font-bold text-[#102C50] text-base text-left hover:text-pitch-700 focus:text-pitch-700 focus:outline-none focus:underline transition" aria-label="View ${t.name} team profile">${t.name} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-70"></i></button>
-                                                <div class="text-xs text-slate-400"><span class="text-pitch-400 font-semibold">${t.pool}</span> • ${t.category}</div>
-                                            </div>
-                                        </div>
-                                        <div class="text-xs text-slate-300 bg-navy-950/70 p-3 rounded-xl space-y-1.5 border border-white/5">
-                                            <div><span class="text-slate-400">Division:</span> ${t.category}</div>
-                                            <div><span class="text-slate-400">Team Manager:</span> ${t.coach}</div>
-                                        </div>
-                                    </div>
-                                `).join("")}
-                            </div>
-                        `}
-                    </div>
-                `;
-            },
-
-            /* 5. PLAYERS */
-            renderPlayers() {
-                const edYear = TournamentStore.activeEditionYear;
-                const players = TournamentStore.players.filter(p => p.edition === edYear);
-                return `
-                    <div class="space-y-6">
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                            <div>
-                                <h1 class="font-sport text-3xl font-bold text-white">Tournament Player Directory (${edYear})</h1>
-                                <p class="text-sm text-slate-400">Registered players retrieved from Supabase.</p>
-                            </div>
-                            <input type="text" onkeyup="App.filterList('player-row-item', this.value)" placeholder="Search player or position..."
-                                class="bg-navy-900 border border-white/15 rounded-xl px-4 py-2 text-sm text-white w-full sm:w-64 focus:border-pitch-500 focus:outline-none">
-                        </div>
-
-                        <div class="sport-card rounded-2xl overflow-hidden">
-                            <div class="overflow-x-auto">
-                                <table class="w-full rugby-table text-left text-sm">
-                                    <thead>
-                                        <tr>
-                                            <th class="p-3.5">#</th>
-                                            <th class="p-3.5">Player Name</th>
-                                            <th class="p-3.5">Squad</th>
-                                            <th class="p-3.5">Position</th>
-                                            <th class="p-3.5 text-center">Tries</th>
-                                            <th class="p-3.5 text-center">Total Pts</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        ${players.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-400">No player records available in the players table yet.</td></tr>` : players.map(p => {
-                                            const totalPts = (p.tries * 5) + (p.conversions * 2) + (p.penalties * 3) + (p.dropGoals * 3);
-                                            return `
-                                                <tr class="player-row-item" data-search="${(p.name + ' ' + p.teamName + ' ' + p.position).toLowerCase()}">
-                                                    <td class="p-3.5 font-sport font-bold text-lg text-pitch-400">#${p.number}</td>
-                                                    <td class="p-3.5 font-semibold text-white">${p.name}</td>
-                                                    <td class="p-3.5 text-slate-300">${p.teamName}</td>
-                                                    <td class="p-3.5 text-xs text-slate-400">${p.position}</td>
-                                                    <td class="p-3.5 text-center font-bold text-white">${p.tries}</td>
-                                                    <td class="p-3.5 text-center font-sport font-bold text-lg text-gold-400">${totalPts}</td>
-                                                </tr>
-                                            `;
-                                        }).join("")}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 6. FIXTURES & BRACKET PROGRESSION (Shows all Pool + Knockout Match 13–19) */
-            renderFixtures() {
-                const edYear = String(TournamentStore.activeEditionYear);
-                let allMatches = MatchEngine.matches
-                    .filter(m => String(m.edition) === edYear)
-                    .sort((a, b) => (a.matchNumberRaw || 999) - (b.matchNumberRaw || 999));
-
-                if (allMatches.length === 0 && MatchEngine.matches.length > 0) {
-                    allMatches = [...MatchEngine.matches].sort((a, b) => (a.matchNumberRaw || 999) - (b.matchNumberRaw || 999));
-                }
-
-                const categories = [...new Set(allMatches.map(m => m.category).filter(Boolean))];
-                if (MatchEngine.selectedCategoryFilter !== "ALL" && !categories.includes(MatchEngine.selectedCategoryFilter)) {
-                    MatchEngine.selectedCategoryFilter = "ALL";
-                }
-                const selectedCat = MatchEngine.selectedCategoryFilter;
-
-                const filteredMatches = selectedCat === "ALL"
-                    ? allMatches
-                    : allMatches.filter(m => m.category === selectedCat);
-
-                const knockoutMatches = allMatches.filter(m =>
-                    MatchEngine.isKnockoutRound(m.roundName || m.stage, m.matchNumberRaw) &&
-                    (selectedCat === "ALL" || m.category === selectedCat)
-                );
-
-                return `
-                    <div class="space-y-8">
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                            <div>
-                                <h1 class="font-sport text-3xl font-bold text-white">Match Fixtures &amp; Knockout Bracket (${edYear})</h1>
-                                <p class="text-sm text-slate-400">Jadual penuh peringkat kumpulan dan perlawanan kalah mati (Match 13–19).</p>
-                            </div>
-                            <div class="flex flex-wrap items-center gap-2">
-                                <select onchange="MatchEngine.selectedCategoryFilter=this.value; App.renderCurrentPage()"
-                                    class="bg-navy-900 border border-white/15 rounded-xl px-3.5 py-2 text-xs font-semibold text-white">
-                                    <option value="ALL" ${selectedCat === "ALL" ? "selected" : ""}>All Categories (${allMatches.length})</option>
-                                    ${categories.map(c => `<option value="${c}" ${selectedCat === c ? "selected" : ""}>${c}</option>`).join("")}
-                                </select>
-                                ${AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"]) ? `
-                                    <button onclick="MatchEngine.advanceQualifiedTeams('${selectedCat === "ALL" ? "All Categories" : selectedCat}')"
-                                        class="px-3.5 py-2 rounded-xl bg-gold-500 text-white text-xs font-bold shadow">
-                                        <i class="fa-solid fa-wand-magic-sparkles mr-1"></i> Sync Qualified Teams
-                                    </button>
-                                ` : ""}
-                            </div>
-                        </div>
-
-                        ${knockoutMatches.length > 0 ? `
-                            <section class="sport-card p-6 rounded-2xl">
-                                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
-                                    <div>
-                                        <h2 class="font-sport text-2xl font-bold text-white"><i class="fa-solid fa-trophy text-gold-400 mr-2"></i>Knockout Bracket Pathway (Matches 13–19)</h2>
-                                        <p class="text-xs text-slate-400">Slot kosong diisi secara automatik selepas keputusan prasyarat OFFICIAL FINAL; pasukan sedia ada tidak ditindih.</p>
-                                    </div>
-                                </div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                    ${knockoutMatches.map(m => {
-                                        const desc = MatchEngine.getKnockoutDescriptor(m);
-                                        const h = desc.homeTeam;
-                                        const a = desc.awayTeam;
-                                        const needsExtraTime = MatchEngine.isExtraTimeRequired(m);
-                                        const hWin = m.status === "FINAL" && m.officialConfirmed && m.homeScore > m.awayScore;
-                                        const aWin = m.status === "FINAL" && m.officialConfirmed && m.awayScore > m.homeScore;
-                                        return `
-                                            <div class="p-4 rounded-xl bg-navy-800/70 border border-pitch-500/30 flex flex-col justify-between gap-3">
-                                                <div>
-                                                    <div class="flex justify-between items-start gap-2 text-xs font-bold text-pitch-400 mb-1.5">
-                                                        <span>Match ${m.matchNumberRaw} • ${desc.isPendingQualification ? desc.pendingBanner : (m.roundName || m.stage)}</span>
-                                                        <span class="px-2 py-0.5 rounded bg-white text-[10px] text-[#102C50] shrink-0">${m.status}</span>
-                                                    </div>
-                                                    <div class="text-[11px] text-slate-500 mb-2.5">${m.category} • ${m.pitch} • ${m.kickoff} (${m.matchDurationMinutes || 12} mins)</div>
-                                                    <div class="space-y-1.5 text-sm">
-                                                        <div class="flex justify-between items-center p-2.5 rounded-lg bg-white ${hWin ? 'ring-2 ring-amber-400 font-bold' : ''}">
-                                                            <span class="${h.isPending ? 'text-slate-500 italic text-xs font-semibold' : 'font-semibold'}">${h.name}</span>
-                                                            <span class="font-sport text-lg font-bold">${m.status === 'SCHEDULED' ? '-' : m.homeScore}</span>
-                                                        </div>
-                                                        <div class="flex justify-between items-center p-2.5 rounded-lg bg-white ${aWin ? 'ring-2 ring-amber-400 font-bold' : ''}">
-                                                            <span class="${a.isPending ? 'text-slate-500 italic text-xs font-semibold' : 'font-semibold'}">${a.name}</span>
-                                                            <span class="font-sport text-lg font-bold">${m.status === 'SCHEDULED' ? '-' : m.awayScore}</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div class="pt-2 border-t border-slate-200/70 flex items-center justify-between gap-2 text-[11px]">
-                                                    <span class="${needsExtraTime ? 'text-orange-800 font-bold' : desc.adminReviewRequired ? 'text-amber-900 font-bold' : desc.isPendingQualification ? 'text-amber-700 font-semibold' : 'text-emerald-700 font-semibold'}">
-                                                        ${needsExtraTime ? 'EXTRA TIME REQUIRED' : desc.adminReviewRequired ? 'ADMIN REVIEW REQUIRED' : desc.isPendingQualification ? 'Pending Qualification' : 'Qualified Teams Confirmed'}
-                                                    </span>
-                                                    <button onclick="MatchEngine.selectedMatchId='${m.id}'; App.navigate('matchdetails')" class="text-pitch-400 font-bold hover:underline shrink-0">
-                                                        Match Center &rarr;
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        `;
-                                    }).join("")}
-                                </div>
-                            </section>
-                        ` : ""}
-
-                        <div>
-                            <h2 class="font-sport text-2xl font-bold text-white mb-4">Complete Tournament Schedule (${filteredMatches.length} Matches)</h2>
-                            ${filteredMatches.length === 0 ? `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">No fixtures found for the selected filter.</div>` : `
-                                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                                    ${filteredMatches.map(m => this.renderMatchCard(m)).join("")}
-                                </div>
-                            `}
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 7. LIVE SCORES */
-            renderLiveScores() {
-                const edYear = TournamentStore.activeEditionYear;
-                const liveMatches = MatchEngine.matches.filter(m => m.edition === edYear && m.status === "LIVE");
-                const recentFinal = MatchEngine.matches.filter(m => m.edition === edYear && m.status === "FINAL");
-
-                return `
-                    <div class="space-y-8">
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                            <div>
-                                <div class="inline-flex items-center gap-2 text-xs font-bold text-red-400 uppercase tracking-wider mb-1">
-                                    <span class="relative flex h-2.5 w-2.5"><span class="live-dot relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span></span>
-                                    REAL-TIME MATCH FEED
-                                </div>
-                                <h1 class="font-sport text-3xl sm:text-4xl font-bold text-white">Live Scores (${edYear})</h1>
-                            </div>
-                            ${AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"]) ? `
-                                <button onclick="DashboardViews.openScorekeeperConsole()" class="px-4 py-2.5 rounded-xl bg-pitch-600 hover:bg-pitch-500 text-white text-sm font-bold">
-                                    <i class="fa-solid fa-sliders mr-1.5"></i> Open Scorekeeper Console
-                                </button>
-                            ` : ''}
-                        </div>
-
-                        ${liveMatches.length > 0 ? `
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                ${liveMatches.map(m => this.renderMatchCard(m)).join("")}
-                            </div>
-                        ` : `
-                            <div class="sport-card p-10 rounded-2xl text-center">
-                                <p class="text-slate-300 font-semibold">No matches currently in progress.</p>
-                                <p class="text-xs text-slate-400 mt-1">Check upcoming fixtures or completed results below.</p>
-                            </div>
-                        `}
-
-                        <div>
-                            <h2 class="font-sport text-2xl font-bold text-white mb-4">Recently Completed Matches</h2>
-                            ${recentFinal.length === 0 ? `<div class="sport-card p-6 rounded-2xl text-sm text-slate-400">No completed matches yet.</div>` : `
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-                                    ${recentFinal.map(m => this.renderMatchCard(m)).join("")}
-                                </div>
-                            `}
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 8. MATCH DETAILS (MATCH CENTER) */
-            renderMatchDetails() {
-                const edMatches = MatchEngine.matches.filter(m => m.edition === TournamentStore.activeEditionYear);
-                if (edMatches.length === 0) {
-                    return `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">No matches available for this edition.</div>`;
-                }
-                const match = MatchEngine.getMatch(MatchEngine.selectedMatchId) || edMatches[0];
-                const desc = MatchEngine.getKnockoutDescriptor(match);
-                const home = desc.homeTeam;
-                const away = desc.awayTeam;
-                const needsExtraTime = MatchEngine.isExtraTimeRequired(match);
-
-                return `
-                    <div class="space-y-6">
-                        <div class="flex flex-wrap items-center justify-between gap-3">
-                            <button onclick="App.navigate('fixtures')" class="text-sm text-slate-300 hover:text-white flex items-center gap-1.5">
-                                <i class="fa-solid fa-arrow-left"></i> Back to Fixtures
-                            </button>
-                            <div class="flex items-center gap-2">
-                                <label class="text-xs text-slate-400">Switch Match:</label>
-                                <select onchange="MatchEngine.selectedMatchId=this.value; App.renderCurrentPage()"
-                                    class="bg-navy-900 border border-white/15 rounded-xl px-3 py-1.5 text-xs text-white">
-                                    ${edMatches.map(m => {
-                                        const d = MatchEngine.getKnockoutDescriptor(m);
-                                        return `<option value="${m.id}" ${m.id === match.id ? 'selected' : ''}>${m.matchNo}: ${d.homeTeam.name} vs ${d.awayTeam.name}</option>`;
-                                    }).join("")}
-                                </select>
-                            </div>
-                        </div>
-
-                        ${needsExtraTime ? `
-                            <div class="p-4 rounded-2xl bg-orange-500/15 border border-orange-500/40 text-orange-950 flex items-center gap-3 text-sm font-bold">
-                                <i class="fa-solid fa-clock text-orange-600 text-lg"></i>
-                                <span>EXTRA TIME REQUIRED – Tied knockout match (${match.homeScore} - ${match.awayScore}).</span>
-                            </div>
-                        ` : ""}
-
-                        ${desc.adminReviewRequired ? `
-                            <div class="p-4 rounded-2xl bg-amber-500/20 border border-amber-500/50 text-amber-950 flex items-center gap-3 text-sm font-bold">
-                                <i class="fa-solid fa-triangle-exclamation text-amber-700 text-lg"></i>
-                                <span>ADMIN REVIEW REQUIRED${desc.reviewReason ? ` – ${Views.escapeHtml(desc.reviewReason)}` : ' – Existing team assignment preserved.'}</span>
-                            </div>
-                        ` : ""}
-
-                        <!-- Scoreboard Header -->
-                        <div class="sport-card rounded-3xl overflow-hidden">
-                            <div class="bg-navy-950 px-6 py-3 border-b border-white/10 flex flex-wrap justify-between items-center text-xs text-slate-400">
-                                <span><strong class="text-pitch-400">${match.matchNo}</strong> • ${match.category} • ${desc.isPendingQualification ? desc.pendingBanner : match.stage}</span>
-                                <span><i class="fa-solid fa-location-dot text-pitch-400 mr-1"></i>${match.pitch}</span>
-                            </div>
-
-                            <div class="p-6 sm:p-10 pitch-gradient grid grid-cols-1 md:grid-cols-3 items-center gap-6 text-center">
-                                <div>
-                                    <div class="w-14 h-14 mx-auto rounded-2xl flex items-center justify-center font-sport font-bold text-xl text-white mb-2 shadow-lg" style="background:${home.color}">${home.short}</div>
-                                    <h2 class="font-sport text-2xl sm:text-3xl font-bold text-white">${home.name}</h2>
-                                    <div class="font-sport text-6xl font-bold text-white mt-2">${match.homeScore}</div>
-                                </div>
-
-                                <div class="flex flex-col items-center">
-                                    <span class="px-3 py-1 rounded-full text-xs font-bold uppercase ${match.status === 'LIVE' ? 'bg-red-600 text-white' : 'bg-navy-950 text-slate-300'}">
-                                        ${match.status === 'LIVE' ? MatchEngine.formatPeriodLabel(match.period) : match.status}
-                                    </span>
-                                    <div data-live-clock="${match.id}" class="font-sport text-4xl sm:text-5xl font-bold text-gold-400 my-3">
-                                        ${MatchEngine.formatClock(match.elapsedSeconds)}
-                                    </div>
-                                    ${match.officialConfirmed ? `<span class="text-xs text-white font-semibold"><i class="fa-solid fa-circle-check mr-1"></i>Official Result Verified</span>` : ''}
-                                </div>
-
-                                <div>
-                                    <div class="w-14 h-14 mx-auto rounded-2xl flex items-center justify-center font-sport font-bold text-xl text-white mb-2 shadow-lg" style="background:${away.color}">${away.short}</div>
-                                    <h2 class="font-sport text-2xl sm:text-3xl font-bold text-white">${away.name}</h2>
-                                    <div class="font-sport text-6xl font-bold text-white mt-2">${match.awayScore}</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Match Event Timeline -->
-                        <div class="sport-card p-6 rounded-2xl">
-                            <h3 class="font-sport text-2xl font-bold text-white mb-4">Official Match Summary</h3>
-                            ${this.renderEventTimeline(match)}
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 9. RESULTS */
-            renderResults() {
-                const edYear = TournamentStore.activeEditionYear;
-                const finals = MatchEngine.matches.filter(m => m.edition === edYear && m.status === "FINAL");
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">Official Match Results (${edYear})</h1>
-                            <p class="text-sm text-slate-400">Final scores and match summaries.</p>
-                        </div>
-                        ${finals.length === 0 ? `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">No completed matches recorded yet for ${edYear}.</div>` : `
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
-                                ${finals.map(m => this.renderMatchCard(m)).join("")}
-                            </div>
-                        `}
-                    </div>
-                `;
-            },
-
-            /* 10. TEAM STANDINGS (STRICTLY SEPARATED BY CATEGORY & POOL) */
-            renderStandings() {
-                const edYear = TournamentStore.activeEditionYear;
-                const edition = TournamentStore.editions[edYear] || { categories: [] };
-                const teamCategories = TournamentStore.teams
-                    .filter(t => t.edition === edYear)
-                    .map(t => t.category)
-                    .filter(Boolean);
-                const editionCatNames = (edition.categories || []).map(c => c.name);
-                const categories = [...new Set([...editionCatNames, ...teamCategories])].sort((a, b) => a.localeCompare(b));
-
-                const renderPoolTable = (category, poolName, rows) => {
-                    const tie2 = MatchEngine.detectBoundaryTie(rows, 1);
-                    const tie3 = MatchEngine.detectBoundaryTie(rows, 2);
-                    const tie4 = MatchEngine.detectBoundaryTie(rows, 3);
-                    const activeTies = [tie2, tie3, tie4].filter(t => t.hasTie);
-
-                    return `
-                    <div class="mb-6 last:mb-0">
-                        <div class="px-4 py-2 bg-navy-800/70 text-xs font-bold uppercase tracking-wider text-pitch-400 border-b border-white/10 flex flex-wrap items-center justify-between gap-2">
-                            <span>${poolName}</span>
-                            ${activeTies.length > 0 ? `<span class="px-2 py-0.5 rounded bg-orange-500/20 text-orange-800 text-[10px]">TIE AT RANK ${activeTies.map(t => t.boundaryRank).join("/")} — OFFICIAL REVIEW REQUIRED</span>` : ""}
-                        </div>
-                        <div class="overflow-x-auto">
-                            <table class="w-full rugby-table text-left text-sm">
-                                <thead><tr>
-                                    <th class="p-3.5">Pos</th><th class="p-3.5">Team</th>
-                                    <th class="p-3.5 text-center">P</th><th class="p-3.5 text-center">W</th>
-                                    <th class="p-3.5 text-center">D</th><th class="p-3.5 text-center">L</th>
-                                    <th class="p-3.5 text-center">PF</th><th class="p-3.5 text-center">PA</th>
-                                    <th class="p-3.5 text-center">PD</th>
-                                    <th class="p-3.5 text-center">PTS</th>
-                                </tr></thead>
-                                <tbody>
-                                    ${rows.map((r, i) => `
-                                        <tr>
-                                            <td class="p-3.5 font-bold text-slate-400">${i + 1}</td>
-                                            <td class="p-3.5 font-bold text-white">${r.team.name}</td>
-                                            <td class="p-3.5 text-center">${r.played}</td>
-                                            <td class="p-3.5 text-center text-emerald-600 font-semibold">${r.won}</td>
-                                            <td class="p-3.5 text-center">${r.drawn}</td>
-                                            <td class="p-3.5 text-center text-red-600">${r.lost}</td>
-                                            <td class="p-3.5 text-center">${r.pf}</td>
-                                            <td class="p-3.5 text-center">${r.pa}</td>
-                                            <td class="p-3.5 text-center font-mono text-xs">${r.pd >= 0 ? '+' + r.pd : r.pd}</td>
-                                            <td class="p-3.5 text-center font-sport text-xl font-bold text-gold-400">${r.pts}</td>
-                                        </tr>
-                                    `).join("")}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                `;
-                };
-
-                const renderCategorySection = (category) => {
-                    const catTeams = TournamentStore.teams.filter(t => t.edition === edYear && t.category === category);
-                    const pools = [...new Set(catTeams.map(t => t.pool).filter(Boolean))].sort();
-
-                    return `
-                        <section class="sport-card rounded-2xl overflow-hidden">
-                            <div class="p-4 border-b border-white/10 flex flex-wrap items-center justify-between gap-2">
-                                <div>
-                                    <h2 class="font-sport text-2xl font-bold text-white">${category}</h2>
-                                    <p class="text-xs text-slate-400">Kedudukan diasingkan khusus untuk kategori ${category} sahaja (berdasarkan keputusan OFFICIAL FINAL).</p>
-                                </div>
-                                <span class="px-2.5 py-1 rounded-full bg-pitch-600/15 text-pitch-400 text-xs font-bold">${catTeams.length} Teams</span>
-                            </div>
-                            ${catTeams.length === 0 ? `
-                                <div class="p-6 text-center text-slate-400 text-sm">Tiada pasukan berdaftar dalam kategori ini.</div>
-                            ` : pools.map(poolName => {
-                                const rows = MatchEngine.computeStandings(edYear, category, poolName);
-                                return renderPoolTable(category, poolName, rows);
-                            }).join("")}
-                        </section>
-                    `;
-                };
-
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">Tournament Standings (${edYear})</h1>
-                            <p class="text-sm text-slate-400">Kedudukan pasukan diasingkan mengikut kategori dan kumpulan (pool). Pasukan daripada kategori berlainan tidak dicampurkan.</p>
-                        </div>
-                        ${categories.length === 0 ? `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">No standings data available.</div>` : categories.map(renderCategorySection).join("")}
-                    </div>
-                `;
-            },
-
-            /* 11. PLAYER STATISTICS */
-            renderStats() {
-                const edYear = TournamentStore.activeEditionYear;
-                const players = TournamentStore.players.filter(p => p.edition === edYear).map(p => ({
-                    ...p,
-                    totalPoints: (p.tries * 5) + (p.conversions * 2) + (p.penalties * 3) + (p.dropGoals * 3)
-                })).sort((a, b) => b.totalPoints - a.totalPoints || b.tries - a.tries);
-
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">Player Statistics &amp; Top Scorers (${edYear})</h1>
-                            <p class="text-sm text-slate-400">Official tournament leaderboard for tries, conversions, kicks, and discipline.</p>
-                        </div>
-
-                        <div class="sport-card rounded-2xl overflow-hidden">
-                            <div class="overflow-x-auto">
-                                <table class="w-full rugby-table text-left text-sm">
-                                    <thead>
-                                        <tr>
-                                            <th class="p-3.5">Rank</th>
-                                            <th class="p-3.5">Player</th>
-                                            <th class="p-3.5">Team</th>
-                                            <th class="p-3.5 text-center">Tries (5)</th>
-                                            <th class="p-3.5 text-center">Conv (2)</th>
-                                            <th class="p-3.5 text-center">Pen (3)</th>
-                                            <th class="p-3.5 text-center">DG (3)</th>
-                                            <th class="p-3.5 text-center">YC / RC</th>
-                                            <th class="p-3.5 text-center">Points</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        ${players.length === 0 ? `<tr><td colspan="9" class="p-6 text-center text-slate-400">Tiada statistik pemain direkodkan lagi.</td></tr>` : players.map((p, idx) => `
-                                            <tr>
-                                                <td class="p-3.5 font-bold ${idx === 0 ? 'text-gold-400' : 'text-slate-400'}">${idx + 1}</td>
-                                                <td class="p-3.5 font-semibold text-white">${p.name} <span class="text-xs text-slate-400">(#${p.number})</span></td>
-                                                <td class="p-3.5 text-xs text-slate-300">${p.teamName}</td>
-                                                <td class="p-3.5 text-center font-bold text-pitch-400">${p.tries}</td>
-                                                <td class="p-3.5 text-center">${p.conversions}</td>
-                                                <td class="p-3.5 text-center">${p.penalties}</td>
-                                                <td class="p-3.5 text-center">${p.dropGoals}</td>
-                                                <td class="p-3.5 text-center text-xs">
-                                                    <span class="text-amber-600 font-bold">${p.yellowCards}</span> / <span class="text-red-600 font-bold">${p.redCards}</span>
-                                                </td>
-                                                <td class="p-3.5 text-center font-sport text-xl font-bold text-gold-400">${p.totalPoints}</td>
-                                            </tr>
-                                        `).join("")}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 12. TOURNAMENT NEWS */
-            renderNews() {
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">Tournament News &amp; Official Bulletins</h1>
-                            <p class="text-sm text-slate-400">Match reports, schedule announcements, and medical/weather advisories.</p>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            ${TournamentStore.news.map(item => `
-                                <article class="sport-card p-6 rounded-2xl flex flex-col justify-between">
-                                    <div>
-                                        <div class="flex items-center justify-between text-xs mb-3">
-                                            <span class="px-2.5 py-0.5 rounded bg-pitch-600/25 text-pitch-400 font-bold">${item.category}</span>
-                                            <span class="text-slate-400">${item.date}</span>
-                                        </div>
-                                        <h3 class="font-bold text-lg text-white mb-2 leading-snug">${item.title}</h3>
-                                        <p class="text-sm text-slate-300 leading-relaxed">${item.summary}</p>
-                                    </div>
-                                    <div class="mt-4 pt-3 border-t border-white/10 text-xs text-slate-400">
-                                        Published by ${item.author}
-                                    </div>
-                                </article>
-                            `).join("")}
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 13. VENUE INFORMATION */
-            renderVenue() {
-                const ed = TournamentStore.editions[TournamentStore.activeEditionYear] || {};
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">Venue Information &amp; Pitch Layout</h1>
-                            <p class="text-sm text-slate-400">${ed.venue || "Padang Ragbi ADTEC Shah Alam, Selangor, Malaysia."}</p>
-                        </div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                            <div class="lg:col-span-2 sport-card p-6 rounded-2xl space-y-4">
-                                <h3 class="font-bold text-lg text-white">Championship Pitch Allocation</h3>
-                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                    <div class="p-4 rounded-xl bg-navy-800 border border-pitch-500/30">
-                                        <div class="font-sport text-xl font-bold text-pitch-400">PITCH 1</div>
-                                        <div class="font-semibold text-white text-sm">Main Stadium Turf</div>
-                                        <p class="text-xs text-slate-300 mt-1">Cup Pools, Semi-Finals &amp; Championship Finals.</p>
-                                    </div>
-                                    <div class="p-4 rounded-xl bg-navy-950/80 border border-white/10">
-                                        <div class="font-sport text-xl font-bold text-sky-500">PITCH 2</div>
-                                        <div class="font-semibold text-white text-sm">North Field</div>
-                                        <p class="text-xs text-slate-300 mt-1">Division Pool Matches &amp; Plate Knockout.</p>
-                                    </div>
-                                    <div class="p-4 rounded-xl bg-navy-950/80 border border-white/10">
-                                        <div class="font-sport text-xl font-bold text-gold-400">PITCH 3</div>
-                                        <div class="font-semibold text-white text-sm">South Field</div>
-                                        <p class="text-xs text-slate-300 mt-1">Age-Grade Matches &amp; Team Warm-Up Zone.</p>
-                                    </div>
-                                </div>
-
-                                <div class="p-4 rounded-xl bg-navy-950 border border-white/10 text-sm text-slate-300 space-y-2">
-                                    <div><strong class="text-white">Host Venue:</strong> ${ed.venue || "Padang Ragbi ADTEC Shah Alam, Selangor"}</div>
-                                    <div><strong class="text-white">Medical &amp; Physio:</strong> Pitchside paramedic and recovery tent adjacent to Tournament Control.</div>
-                                    <div><strong class="text-white">Reporting Time:</strong> All teams must check in 30 minutes before kickoff.</div>
-                                </div>
-                            </div>
-
-                            <div class="sport-card p-6 rounded-2xl flex flex-col justify-between">
-                                <div>
-                                    <h3 class="font-bold text-lg text-white mb-3">Match Day Facilities</h3>
-                                    <ul class="space-y-3 text-sm text-slate-300">
-                                        <li class="flex items-center gap-2.5"><i class="fa-solid fa-kit-medical text-red-500 w-5"></i> Pitchside Paramedic &amp; Recovery Station</li>
-                                        <li class="flex items-center gap-2.5"><i class="fa-solid fa-droplet text-sky-500 w-5"></i> Hydration Refill Stations for Players</li>
-                                        <li class="flex items-center gap-2.5"><i class="fa-solid fa-mosque text-pitch-400 w-5"></i> Surau &amp; Ablution Facilities</li>
-                                        <li class="flex items-center gap-2.5"><i class="fa-solid fa-utensils text-gold-400 w-5"></i> Official Food &amp; Merch Village</li>
-                                    </ul>
-                                </div>
-                                <div class="mt-6 p-3 rounded-xl bg-navy-800 border border-pitch-500/30 text-xs text-slate-300">
-                                    Tournament Operations Desk: <strong>KEMUNING 10s Control</strong>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 14. TOURNAMENT ARCHIVES */
-            renderArchives() {
-                const allEditions = Object.values(TournamentStore.editions).sort((a, b) => Number(b.year) - Number(a.year));
-                return `
-                    <div class="space-y-6">
-                        <div>
-                            <h1 class="font-sport text-3xl font-bold text-white">KEMUNING 10s Tournament Editions &amp; Archives</h1>
-                            <p class="text-sm text-slate-400">Select any edition to load its teams, fixtures, standings, and results.</p>
-                        </div>
-
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            ${allEditions.map(ed => `
-                                <div class="sport-card p-6 rounded-2xl">
-                                    <div class="flex items-center justify-between mb-3">
-                                        <span class="px-3 py-1 rounded-full bg-gold-500/20 text-gold-400 font-bold text-xs">EDITION ${ed.year} • ${ed.status}</span>
-                                        <span class="text-xs text-slate-400">${ed.dates}</span>
-                                    </div>
-                                    <h3 class="font-sport text-2xl font-bold text-white mb-3">${ed.name}</h3>
-                                    <div class="space-y-2 text-sm bg-navy-950/70 p-4 rounded-xl border border-white/10">
-                                        <div><span class="text-slate-400">Venue:</span> <strong class="text-white">${ed.venue}</strong></div>
-                                        <div class="text-xs text-slate-400 pt-1">${ed.description || "Official KEMUNING 10s edition."}</div>
-                                    </div>
-                                    <button onclick="App.switchEdition('${ed.year}'); App.navigate('overview')" class="mt-4 px-4 py-2 rounded-xl bg-pitch-600 text-white text-xs font-bold">
-                                        Load ${ed.year} Edition Data &rarr;
-                                    </button>
-                                </div>
-                            `).join("")}
-                        </div>
-                    </div>
-                `;
-            },
-
-            /* 15. LOGIN PAGE */
-            renderLogin() {
-                if (AuthManager.currentUser) {
-                    if (AuthManager.currentUser.role === "SCOREKEEPER") {
-                        return DashboardViews.renderScorekeeperPage();
-                    }
-                    return DashboardViews.render();
-                }
-
-                return `
-                    <div class="max-w-lg mx-auto py-4">
-                        <div class="sport-card p-6 sm:p-8 rounded-3xl shadow-2xl">
-                            <div class="text-center mb-6">
-                                <div class="w-14 h-14 mx-auto rounded-2xl pitch-gradient border border-pitch-500/40 flex items-center justify-center mb-3">
-                                    <i class="fa-solid fa-shield-halved text-gold-400 text-2xl"></i>
-                                </div>
-                                <h1 class="font-sport text-3xl font-bold text-white" data-i18n="login_title">${App.t("login_title")}</h1>
-                                <p class="text-xs sm:text-sm text-slate-400 mt-1" data-i18n="login_subtitle">${App.t("login_subtitle")}</p>
-                            </div>
-
-                            <form onsubmit="App.handleLoginSubmit(event)" class="space-y-4">
-                                <div>
-                                    <label class="block text-xs font-semibold text-slate-300 uppercase mb-1.5">Official Email Address *</label>
-                                    <input type="email" id="login-email" required placeholder="e.g., official@kemuning10s.my"
-                                        class="w-full bg-navy-950 border border-white/15 rounded-xl px-4 py-3 text-sm text-white focus:border-pitch-500 focus:outline-none">
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-semibold text-slate-300 uppercase mb-1.5">Password *</label>
-                                    <input type="password" id="login-password" required placeholder="••••••••"
-                                        class="w-full bg-navy-950 border border-white/15 rounded-xl px-4 py-3 text-sm text-white focus:border-pitch-500 focus:outline-none">
-                                </div>
-                                <div id="login-error-box" class="hidden p-3 rounded-xl bg-red-500/15 border border-red-500/40 text-xs text-red-700 font-medium"></div>
-
-                                <button type="submit" class="w-full py-3 rounded-xl bg-pitch-600 hover:bg-pitch-500 text-white font-bold text-sm shadow-lg transition" data-i18n="btn_sign_in">
-                                    ${App.t("btn_sign_in")}
-                                </button>
-                            </form>
-
-                            <div class="mt-8 pt-6 border-t border-white/10">
-                                <p class="text-[11px] text-slate-400 text-center">
-                                    Log masuk menggunakan akaun rasmi yang telah dicipta dalam Supabase Authentication.
-                                    Peranan akses dibaca daripada jadual <code>profiles</code> (<code>app_role</code>); pendaftaran peranan sendiri tidak dibenarkan.
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            },
-
-            escapeHtml(str) {
-                return (str || "")
-                    .replace(/&/g, "&amp;")
-                    .replace(/</g, "&lt;")
-                    .replace(/>/g, "&gt;")
-                    .replace(/"/g, "&quot;");
-            }
-        };
-
-        /* ==========================================================================
-           UI HELPERS (Toasts & Custom Modals)
-           ========================================================================== */
-        const UI = {
-            toast(message, type = "info") {
-                const container = document.getElementById("toast-container");
-                if (!container) return;
-
-                const colors = {
-                    success: "bg-emerald-950/95 border-emerald-500/50 text-emerald-100",
-                    error: "bg-red-950/95 border-red-500/50 text-red-100",
-                    warning: "bg-amber-950/95 border-amber-500/50 text-amber-100",
-                    info: "bg-navy-900/95 border-pitch-500/50 text-white"
-                };
-
-                const el = document.createElement("div");
-                el.className = `pointer-events-auto p-3.5 rounded-xl border shadow-2xl text-xs font-medium flex items-center justify-between gap-3 ${colors[type] || colors.info}`;
-                el.innerHTML = `
-                    <span>${message}</span>
-                    <button onclick="this.parentElement.remove()" class="text-white/70 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
-                `;
-                container.appendChild(el);
-                setTimeout(() => {
-                    if (el.parentElement) el.remove();
-                }, 4800);
-            },
-
-            showModal(title, bodyHtml, buttons = []) {
-                document.getElementById("modal-title").textContent = title;
-                document.getElementById("modal-body").innerHTML = bodyHtml;
-                const footer = document.getElementById("modal-footer");
-                footer.innerHTML = "";
-
-                buttons.forEach(btn => {
-                    const b = document.createElement("button");
-                    b.type = "button";
-                    const iconHtml = btn.icon ? `<i class="fa-solid ${btn.icon}"></i>` : "";
-                    b.innerHTML = `${iconHtml}<span>${btn.label}</span>`;
-
-                    if (btn.style === "primary") {
-                        b.className = "modal-btn-primary min-h-[44px] px-5 py-2.5 rounded-xl bg-[#299DD5] hover:bg-[#168BC4] text-white text-sm font-bold inline-flex items-center justify-center gap-2 shadow-sm transition";
-                    } else if (btn.style === "orange") {
-                        b.className = "modal-btn-orange min-h-[44px] px-5 py-2.5 rounded-xl bg-[#F58220] hover:bg-[#E07010] text-white text-sm font-bold inline-flex items-center justify-center gap-2 shadow-sm transition";
-                    } else {
-                        b.className = "modal-btn-secondary min-h-[44px] px-5 py-2.5 rounded-xl bg-[#102C50] hover:bg-[#1B4272] text-white text-sm font-bold inline-flex items-center justify-center gap-2 shadow-sm transition";
-                    }
-
-                    b.onclick = btn.onClick;
-                    footer.appendChild(b);
-                });
-
-                const modal = document.getElementById("custom-modal");
-                modal.classList.remove("hidden");
-                modal.classList.add("flex");
-            },
-
-            closeModal() {
-                const modal = document.getElementById("custom-modal");
-                modal.classList.add("hidden");
-                modal.classList.remove("flex");
-            }
-        };
-
-        /* ==========================================================================
-           MODULE 7: js/app.js
-           Main Application Controller, Router & State Coordinator
-           ========================================================================== */
-        const App = {
-            currentPage: "home",
-            currentLang: "en",
-
-            async init() {
-                const connected = SupabaseConfig.init();
-                if (connected) {
-                    await AuthManager.restoreSession();
-                    try {
-                        await SupabaseData.loadActiveTournament();
-                        console.info(SupabaseData.message);
-                    } catch (dataError) {
-                        SupabaseData.state = "error";
-                        SupabaseData.message = dataError?.message || "Gagal memuat data Supabase.";
-                        console.error("Supabase data load failed:", dataError);
-                    }
-                }
-                MatchEngine.startGlobalTicker();
-                if (connected) {
-                    MatchEngine.subscribeRealtime();
-                    MatchEngine.startLiveDataPolling();
-                }
-                this.updateHeaderAuth();
-
-                const initialHash = window.location.hash.replace("#", "");
-                if (initialHash) {
-                    this.currentPage = initialHash;
-                }
-                this.renderCurrentPage();
-                if (!connected) UI.toast("Supabase tidak dapat dimulakan. Semak sambungan internet atau CDN.", "error");
-                else if (SupabaseData.state !== "connected") UI.toast("Data Supabase belum dapat dimuat: " + SupabaseData.message, "warning");
-            },
-
-            t(key) {
-                return (Translations[this.currentLang] && Translations[this.currentLang][key]) || Translations.en[key] || key;
-            },
-
-            async switchEdition(year) {
-                const yr = String(year);
-                TournamentStore.activeEditionYear = yr;
-                ["global-edition-select", "mobile-edition-select"].forEach(id => {
-                    const el = document.getElementById(id);
-                    if (el) el.value = yr;
-                });
-
-                try {
-                    await SupabaseData.loadTournamentByYear(yr);
-                    UI.toast(`Edisi KEMUNING 10s ${yr} dimuatkan daripada Supabase.`, "info");
-                } catch (err) {
-                    console.error("Gagal menukar edisi:", err);
-                    UI.toast(`Memaparkan edisi ${yr}: ${err.message}`, "warning");
-                }
-                this.renderCurrentPage();
-            },
-
-            toggleMobileMenu(forceState) {
-                const drawer = document.getElementById("mobile-nav-drawer");
-                if (!drawer) return;
-                if (typeof forceState === "boolean") {
-                    drawer.classList.toggle("hidden", !forceState);
-                } else {
-                    drawer.classList.toggle("hidden");
-                }
-            },
-
-            updateHeaderAuth() {
-                const container = document.getElementById("header-auth-controls");
-                if (!container) return;
-
-                if (AuthManager.currentUser) {
-                    if (AuthManager.currentUser.role === "SCOREKEEPER") {
-                        container.innerHTML = `
-                            <button onclick="DashboardViews.openScorekeeperConsole()"
-                                class="px-3.5 py-2 rounded-xl gold-gradient text-white text-xs sm:text-sm font-bold flex items-center gap-2 shadow transition">
-                                <i class="fa-solid fa-stopwatch"></i>
-                                <span>Scorekeeper Console</span>
-                            </button>
-                        `;
-                    } else {
-                        container.innerHTML = `
-                            <div class="flex items-center gap-1.5">
-                                <button onclick="DashboardViews.openScorekeeperConsole()" title="Live Match Scorekeeper Console"
-                                    class="hidden md:inline-flex px-3 py-2 rounded-xl bg-pitch-600 hover:bg-pitch-500 text-white text-xs font-bold items-center gap-1.5 shadow transition">
-                                    <i class="fa-solid fa-stopwatch"></i>
-                                    <span>Scorekeeper</span>
-                                </button>
-                                <button onclick="App.navigate('dashboard')"
-                                    class="px-3.5 py-2 rounded-xl gold-gradient text-white text-xs sm:text-sm font-bold flex items-center gap-2 shadow transition">
-                                    <i class="fa-solid fa-gauge"></i>
-                                    <span>${this.t("nav_dashboard")}</span>
-                                </button>
-                            </div>
-                        `;
-                    }
-                } else {
-                    container.innerHTML = `
-                        <button onclick="App.navigate('login')"
-                            class="px-3.5 py-2 rounded-xl bg-navy-800 hover:bg-pitch-700 text-white border border-white/15 text-xs sm:text-sm font-semibold flex items-center gap-2 transition">
-                            <i class="fa-solid fa-right-to-bracket text-gold-400"></i>
-                            <span>${this.t("nav_login")}</span>
-                        </button>
-                    `;
-                }
-            },
-
-            openTeamProfile(teamId) {
-                const team = TournamentStore.teams.find(t => String(t.id) === String(teamId));
-                if (!team) {
-                    UI.toast("Maklumat pasukan tidak ditemui.", "warning");
-                    return;
-                }
-
-                const esc = value => String(value ?? "-").replace(/[&<>\"']/g, ch => ({
-                    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
-                }[ch]));
-                const players = TournamentStore.players.filter(p =>
-                    p.edition === team.edition && String(p.teamId || "") === String(team.id)
-                );
-                const teamMatches = MatchEngine.matches.filter(m =>
-                    m.edition === team.edition &&
-                    (String(m.homeTeamId || "") === String(team.id) || String(m.awayTeamId || "") === String(team.id))
-                ).sort((a, b) => Number(a.matchNumberRaw || 999) - Number(b.matchNumberRaw || 999));
-
-                const rosterHtml = players.length ? players.map(p => `
-                    <div class="flex items-center justify-between gap-3 py-2 border-b border-slate-200 last:border-0">
-                        <div class="min-w-0"><div class="font-semibold text-[#102C50]">${esc(p.name)}</div><div class="text-xs text-slate-500">${esc(p.position || "Utility")}</div></div>
-                        <span class="shrink-0 rounded-lg bg-sky-50 text-sky-700 px-2.5 py-1 text-xs font-bold">#${esc(p.number ?? "-")}</span>
-                    </div>`).join("") : `<p class="text-sm text-slate-500 py-3">Tiada rekod pemain ditemui untuk pasukan ini.</p>`;
-
-                const matchesHtml = teamMatches.length ? teamMatches.map(m => {
-                    const isHome = String(m.homeTeamId || "") === String(team.id);
-                    const opponent = isHome ? (m.awayLabel || TournamentStore.teams.find(x => String(x.id) === String(m.awayTeamId))?.name || "TBD") : (m.homeLabel || TournamentStore.teams.find(x => String(x.id) === String(m.homeTeamId))?.name || "TBD");
-                    const score = m.status === "SCHEDULED" ? "Belum bermula" : `${Number(m.homeScore) || 0} - ${Number(m.awayScore) || 0}`;
-                    return `<div class="flex items-center justify-between gap-3 py-2 border-b border-slate-200 last:border-0"><div class="min-w-0"><div class="font-semibold text-[#102C50]">${esc(m.matchNo)} <span class="font-normal text-slate-500">vs</span> ${esc(opponent)}</div><div class="text-xs text-slate-500">${esc(m.stage || m.category || "Match")}</div></div><span class="shrink-0 text-xs font-bold text-sky-700">${esc(score)}</span></div>`;
-                }).join("") : `<p class="text-sm text-slate-500 py-3">Tiada rekod perlawanan untuk pasukan ini.</p>`;
-
-                UI.showModal(
-                    `Profil Pasukan — ${team.name}`,
-                    `<div class="space-y-5">
-                        <div class="flex items-center gap-3 rounded-xl bg-sky-50 border border-sky-100 p-4">
-                            <div class="w-14 h-14 rounded-xl flex items-center justify-center text-white font-bold text-lg shadow" style="background:${esc(team.color || "#299DD5")}">${esc(team.short || team.name.slice(0,3))}</div>
-                            <div class="min-w-0"><div class="font-bold text-lg text-[#102C50]">${esc(team.name)}</div><div class="text-xs text-slate-600">${esc(team.category)} • ${esc(team.pool)}</div></div>
-                        </div>
-                        <div class="grid grid-cols-2 gap-3"><div class="rounded-xl bg-slate-50 p-3"><div class="text-xs text-slate-500">Team Manager</div><div class="font-semibold text-[#102C50] mt-1">${esc(team.coach || "-")}</div></div><div class="rounded-xl bg-slate-50 p-3"><div class="text-xs text-slate-500">Jumlah Pemain</div><div class="font-semibold text-[#102C50] mt-1">${players.length}</div></div></div>
-                        <section><h4 class="font-bold text-[#102C50] mb-1">Senarai Pemain</h4><div class="max-h-52 overflow-y-auto">${rosterHtml}</div></section>
-                        <section><h4 class="font-bold text-[#102C50] mb-1">Rekod Perlawanan</h4><div class="max-h-52 overflow-y-auto">${matchesHtml}</div></section>
-                    </div>`,
-                    [{ label: "Tutup", style: "secondary", onClick: () => UI.closeModal() }]
-                );
-            },
-
-            async navigate(page) {
-                this.currentPage = page;
-                window.location.hash = page;
-                if (["fixtures", "livescores", "results", "standings", "matchdetails"].includes(page) && MatchEngine.matches.length === 0 && SupabaseConfig.client) {
-                    try {
-                        await SupabaseData.loadTournamentByYear(TournamentStore.activeEditionYear);
-                    } catch (err) {
-                        console.error("Failed to reload tournament matches on navigation:", err);
-                    }
-                }
-                this.renderCurrentPage();
-                window.scrollTo({ top: 0, behavior: "smooth" });
-            },
-
-            renderCurrentPage() {
-                const viewport = document.getElementById("app-viewport");
-                if (!viewport) return;
-
-                document.querySelectorAll(".nav-link").forEach(btn => {
-                    const isActive = btn.getAttribute("data-page") === this.currentPage;
-                    btn.classList.toggle("bg-navy-800", isActive);
-                    btn.classList.toggle("text-white", isActive);
-                });
-
-                const routes = {
-                    home: () => Views.renderHome(),
-                    overview: () => Views.renderOverview(),
-                    categories: () => Views.renderCategories(),
-                    teams: () => Views.renderTeams(),
-                    players: () => Views.renderPlayers(),
-                    fixtures: () => Views.renderFixtures(),
-                    livescores: () => Views.renderLiveScores(),
-                    matchdetails: () => Views.renderMatchDetails(),
-                    results: () => Views.renderResults(),
-                    standings: () => Views.renderStandings(),
-                    stats: () => Views.renderStats(),
-                    news: () => Views.renderNews(),
-                    venue: () => Views.renderVenue(),
-                    archives: () => Views.renderArchives(),
-                    login: () => Views.renderLogin(),
-                    scorekeeper: () => DashboardViews.renderScorekeeperPage(),
-                    dashboard: () => {
-                        if (AuthManager.currentUser?.role === "SCOREKEEPER") {
-                            return DashboardViews.renderScorekeeperPage();
-                        }
-                        return DashboardViews.render();
-                    }
-                };
-
-                const renderFn = routes[this.currentPage] || routes.home;
-                viewport.innerHTML = renderFn();
-            },
-
-            async handleLoginSubmit(e) {
-                e.preventDefault();
-                const emailInput = document.getElementById("login-email");
-                const passwordInput = document.getElementById("login-password");
-                const errBox = document.getElementById("login-error-box");
-                const submitButton = e.target.querySelector('button[type="submit"]');
-                const email = emailInput?.value || "";
-                const password = passwordInput?.value || "";
-
-                if (submitButton) {
-                    submitButton.disabled = true;
-                    submitButton.textContent = "Signing in...";
-                }
-                if (errBox) errBox.classList.add("hidden");
-
-                try {
-                    const res = await AuthManager.loginWithEmail(email, password);
-                    if (!res.ok) {
-                        if (errBox) {
-                            errBox.textContent = res.message;
-                            errBox.classList.remove("hidden");
-                        }
-                    } else {
-                        if (res.user.role === "SCOREKEEPER") {
-                            DashboardViews.openScorekeeperConsole();
-                        } else {
-                            this.navigate("dashboard");
-                        }
-                        UI.toast(`Welcome back, ${res.user.name}!`, "success");
-                    }
-                } catch (error) {
-                    console.error("Ralat log masuk:", error);
-                    if (errBox) {
-                        errBox.textContent = "Ralat tidak dijangka semasa log masuk. Sila cuba lagi.";
-                        errBox.classList.remove("hidden");
-                    }
-                } finally {
-                    if (submitButton) {
-                        submitButton.disabled = false;
-                        submitButton.textContent = this.t("btn_sign_in");
-                    }
-                }
-            },
-
-            filterList(itemClass, queryText) {
-                const q = (queryText || "").toLowerCase().trim();
-                document.querySelectorAll("." + itemClass).forEach(el => {
-                    const hay = el.getAttribute("data-search") || "";
-                    el.style.display = hay.includes(q) ? "" : "none";
-                });
-            }
-        };
-
-        // Boot Application on Window Load
-        window.addEventListener("DOMContentLoaded", () => {
-            document.addEventListener("click", event => {
-                const teamButton = event.target.closest("[data-team-profile]");
-                if (!teamButton) return;
-                event.preventDefault();
-                App.openTeamProfile(teamButton.getAttribute("data-team-profile"));
-            });
-            App.init();
-        });
-    </script>
-</body>
-</html>
+                            <div class="sport-card p
