@@ -237,7 +237,107 @@
                 padding-right: 20px;
             }
         }
-    </style>
+    
+
+        /* ==========================================================
+           HIGH-CONTRAST FIX — iPad / mobile (2026)
+           Visual-only: improve text and control contrast.
+           ========================================================== */
+        #app-viewport .text-slate-300,
+        #app-viewport .text-slate-400,
+        #app-viewport .text-gray-400 {
+            color: #52677D !important;
+        }
+        #app-viewport .sport-card .bg-navy-950\/80,
+        #app-viewport .glass-panel .bg-navy-950\/80 {
+            background-color: #E5F4FB !important;
+            color: #102C50 !important;
+            border-color: #A9D5EA !important;
+        }
+        #app-viewport .sport-card .bg-navy-950\/80 .text-white,
+        #app-viewport .glass-panel .bg-navy-950\/80 .text-white {
+            color: #102C50 !important;
+        }
+        /* Keep the live scoreboard dark, but make team names and scores white. */
+        #app-viewport .pitch-gradient .bg-navy-950\/70 {
+            background-color: #12395B !important;
+            border: 1px solid rgba(255,255,255,.22) !important;
+        }
+        #app-viewport .pitch-gradient .bg-navy-950\/70,
+        #app-viewport .pitch-gradient .bg-navy-950\/70 .text-white,
+        #app-viewport .pitch-gradient .bg-navy-950\/70 .text-sky-400 {
+            color: #FFFFFF !important;
+        }
+        /* Scoring action buttons: strong blue surface + readable white labels. */
+        #app-viewport button.bg-navy-800,
+        #app-viewport button.bg-navy-700 {
+            background-color: #174B73 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #0F3858 !important;
+        }
+        #app-viewport button.bg-navy-800 span,
+        #app-viewport button.bg-navy-700 span,
+        #app-viewport button.bg-navy-800 .text-pitch-400,
+        #app-viewport button.bg-navy-700 .text-pitch-400,
+        #app-viewport button.bg-navy-800 .text-sky-400,
+        #app-viewport button.bg-navy-700 .text-sky-400 {
+            color: #BDEBFF !important;
+        }
+        #app-viewport button.bg-pitch-700,
+        #app-viewport button.bg-pitch-600,
+        #app-viewport button.bg-sky-700,
+        #app-viewport button.bg-sky-600 {
+            background-color: #0876A8 !important;
+            color: #FFFFFF !important;
+            border: 1px solid #075D86 !important;
+        }
+        #app-viewport button.bg-pitch-700 .text-gold-300,
+        #app-viewport button.bg-sky-700 .text-gold-300 {
+            color: #FFF1B8 !important;
+        }
+        #app-viewport button.bg-yellow-500\/20 {
+            background-color: #FFF2C2 !important;
+            color: #704900 !important;
+            border: 1px solid #D69E16 !important;
+        }
+        #app-viewport button.bg-red-500\/20 {
+            background-color: #FDE2E2 !important;
+            color: #991B1B !important;
+            border: 1px solid #E5A0A0 !important;
+        }
+        #app-viewport button:disabled {
+            background-color: #E2E8F0 !important;
+            color: #526174 !important;
+            border-color: #CBD5E1 !important;
+            opacity: 1 !important;
+        }
+        #app-viewport .text-slate-300,
+        #app-viewport .text-slate-400 {
+            font-weight: 500;
+        }
+        footer .text-slate-300,
+        footer .text-slate-400,
+        footer .text-gray-400 {
+            color: #D6E4F0 !important;
+        }
+        #app-viewport .bg-navy-800:not(button) {
+            color: #102C50;
+        }
+        #app-viewport .bg-navy-800:not(button) .text-slate-300,
+        #app-viewport .bg-navy-800:not(button) .text-slate-400 {
+            color: #52677D !important;
+        }
+        @media (max-width: 767px) {
+            #app-viewport button {
+                min-height: 48px;
+                font-size: 14px !important;
+            }
+            #app-viewport .text-slate-300,
+            #app-viewport .text-slate-400 {
+                font-size: 13px;
+            }
+        }
+</style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-pitch-600 selection:text-white">
     <!-- Primary Navigation Header -->
@@ -4352,7 +4452,7 @@
 
                             <div class="p-5 rounded-2xl bg-navy-800 border border-pitch-500/30">
                                 <h3 class="font-bold text-pitch-400 text-sm uppercase tracking-wider mb-2"><i class="fa-solid fa-book-open mr-2"></i>Official Competition Regulations &amp; Points System</h3>
-                                <p class="text-sm text-slate-300 leading-relaxed">${ed.rulesSummary}</p>
+                                <p class="text-sm text-slate-300 leading-relaxed">Mata: Menang 3, Seri 1, Kalah 0. Tiada mata bonus.</p>
                             </div>
                         </div>
                     </div>
