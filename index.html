@@ -437,6 +437,20 @@
             timerInterval: null,
             matches: [],
 
+            // Verified KEMUNING 10s category UUIDs
+            CATEGORY_IDS: {
+                U16: "53f929b4-afab-4d68-ba5c-6e30359709c2",
+                U20: "c1a397f6-b7ba-4d5b-a0ea-22b0f94a6c6e"
+            },
+
+            // Expected match_number prerequisite sets
+            PREREQUISITE_SETS: {
+                U16_POOL: [3, 4, 7, 8, 11, 12],
+                U20_POOL_A: [2, 6, 10],
+                U20_POOL_B: [1, 5, 9],
+                U20_SEMI_FINALS: [13, 14]
+            },
+
             // Knockout placeholder labels for Match 13–19 before qualification is finalized
             KNOCKOUT_PLACEHOLDERS: {
                 13: {
@@ -519,6 +533,65 @@
                 });
             },
 
+            /* -------------------- STRICT SCORE & OFFICIAL RESULT HELPERS -------------------- */
+            parseStrictScore(val) {
+                if (val === null || val === undefined || typeof val === "boolean") return null;
+                if (typeof val === "string") {
+                    const trimmed = val.trim();
+                    if (trimmed === "" || !/^-?\d+$/.test(trimmed)) return null;
+                    const parsed = Number(trimmed);
+                    return Number.isSafeInteger(parsed) ? parsed : null;
+                }
+                if (typeof val === "number") {
+                    if (!Number.isFinite(val) || !Number.isSafeInteger(val)) return null;
+                    return val;
+                }
+                return null;
+            },
+
+            hasValidScores(match) {
+                if (!match) return false;
+                return this.parseStrictScore(match.homeScore) !== null && this.parseStrictScore(match.awayScore) !== null;
+            },
+
+            isOfficiallyFinal(match) {
+                if (!match) return false;
+                return (
+                    match.status === "FINAL" &&
+                    match.officialConfirmed === true &&
+                    this.hasValidScores(match)
+                );
+            },
+
+            normalizePoolLetter(poolName) {
+                return String(poolName || "")
+                    .trim()
+                    .toLowerCase()
+                    .replace(/^pool\s+/i, "");
+            },
+
+            isKnockoutMatchNumber(matchNumberRaw) {
+                const mNum = Number(matchNumberRaw);
+                return Number.isInteger(mNum) && mNum >= 13 && mNum <= 19;
+            },
+
+            isTiedKnockoutMatch(match) {
+                if (!match) return false;
+                const mNum = Number(match.matchNumberRaw);
+                const isKnockout = this.isKnockoutMatchNumber(mNum) || this.isKnockoutRound(match.roundName || match.stage, mNum);
+                if (!isKnockout) return false;
+                if (!["LIVE", "FINAL"].includes(match.status)) return false;
+                const h = this.parseStrictScore(match.homeScore);
+                const a = this.parseStrictScore(match.awayScore);
+                return h !== null && a !== null && h === a;
+            },
+
+            isExtraTimeRequired(match) {
+                if (!match) return false;
+                if (match.extraTimeRequired === true) return true;
+                return this.isTiedKnockoutMatch(match);
+            },
+
             getTeam(teamId, fallbackLabel = null) {
                 if (!teamId) {
                     const slotText = (fallbackLabel || "").trim();
@@ -546,6 +619,7 @@
                 const homeQualified = Boolean(match?.homeTeamId && TournamentStore.teams.some(t => t.id === match.homeTeamId));
                 const awayQualified = Boolean(match?.awayTeamId && TournamentStore.teams.some(t => t.id === match.awayTeamId));
                 const isPendingQualification = !homeQualified || !awayQualified;
+                const adminReviewRequired = Boolean(match?.adminReviewRequired);
 
                 const homeSlot = (match?.homeLabel || "").trim() || (meta ? meta.homeSlot : "");
                 const awaySlot = (match?.awayLabel || "").trim() || (meta ? meta.awaySlot : "");
@@ -564,16 +638,30 @@
                     awaySlot,
                     homeTeam: this.getTeam(match?.homeTeamId, homeSlot),
                     awayTeam: this.getTeam(match?.awayTeamId, awaySlot),
-                    isPendingQualification
+                    isPendingQualification,
+                    adminReviewRequired,
+                    reviewReason: match?.adminReviewReason || ""
                 };
             },
 
             isMatchUnresolved(match) {
                 if (!match) return true;
+
                 const mNum = Number(match.matchNumberRaw);
-                const isKnockout = (mNum >= 13 && mNum <= 19) || this.isKnockoutRound(match.roundName || match.stage, mNum);
-                const missingTeams = !match.homeTeamId || !match.awayTeamId;
-                return missingTeams && (isKnockout || missingTeams);
+                const isKnockout =
+                    this.isKnockoutMatchNumber(mNum) ||
+                    this.isKnockoutRound(match.roundName || match.stage, mNum);
+
+                const missingTeams =
+                    !match.homeTeamId || !match.awayTeamId;
+
+                if (missingTeams) return true;
+
+                if (isKnockout && match.adminReviewRequired === true) {
+                    return true;
+                }
+
+                return false;
             },
 
             getMatch(matchId) {
@@ -675,6 +763,37 @@
                 return true;
             },
 
+            /* -------------------- BOTTOM-UP RESET SAFEGUARD -------------------- */
+            // Check whether resetting a match would affect downstream knockout matches that already have scores or official results
+            getDownstreamKnockoutConflicts(match) {
+                if (!match) return [];
+                const edYear = String(match.edition || TournamentStore.activeEditionYear);
+                const mNum = Number(match.matchNumberRaw);
+                const editionMatches = this.matches.filter(m => String(m.edition) === edYear);
+
+                let affectedNumbers = [];
+                if (mNum >= 1 && mNum <= 12) {
+                    affectedNumbers = [13, 14, 15, 16, 17, 18, 19];
+                } else if (mNum === 13 || mNum === 14) {
+                    affectedNumbers = [17, 19];
+                } else {
+                    return [];
+                }
+
+                return editionMatches.filter(candidate => {
+                    const cNum = Number(candidate.matchNumberRaw);
+                    if (!affectedNumbers.includes(cNum)) return false;
+                    const hScore = this.parseStrictScore(candidate.homeScore) ?? 0;
+                    const aScore = this.parseStrictScore(candidate.awayScore) ?? 0;
+                    return (
+                        candidate.status !== "SCHEDULED" ||
+                        candidate.officialConfirmed === true ||
+                        hScore > 0 ||
+                        aScore > 0
+                    );
+                });
+            },
+
             // Safely reset a single match back to Scheduled/Upcoming without deleting the fixture or scorekeeper assignment
             confirmResetMatch(matchId) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) {
@@ -684,20 +803,22 @@
                 const match = this.getMatch(matchId);
                 if (!match) return;
                 const desc = this.getKnockoutDescriptor(match);
+                const downstreamConflicts = this.getDownstreamKnockoutConflicts(match);
+                const hasDownstreamBlock = downstreamConflicts.length > 0;
 
-                UI.showModal(
-                    `Confirm Reset Match (${match.matchNo})`,
-                    `<div class="space-y-3 text-xs">
-                        <div class="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-800 font-semibold">
-                            <i class="fa-solid fa-triangle-exclamation mr-1"></i> This will clear the test score and official result for <strong>${match.matchNo}</strong> only, returning its status to <strong>Upcoming (Scheduled)</strong>.
-                        </div>
-                        <div class="bg-navy-800 p-3.5 rounded-xl text-center">
-                            <div class="font-bold text-sm text-[#102C50]">${desc.homeTeam.name} <span class="text-slate-400 mx-1">(${match.homeScore} - ${match.awayScore})</span> ${desc.awayTeam.name}</div>
-                            <div class="text-[11px] text-slate-500 mt-1">${match.category} • ${match.stage} • ${match.pitch}</div>
-                        </div>
-                        <p class="text-slate-600">The fixture, tournament, teams, category, and scorekeeper assignment will remain intact. Standings and knockout slots will refresh automatically.</p>
-                    </div>`,
-                    [
+                const conflictWarningHtml = hasDownstreamBlock
+                    ? `<div class="p-3 rounded-xl bg-red-500/15 border border-red-500/40 text-red-800 font-semibold">
+                        <i class="fa-solid fa-ban mr-1"></i> Reset Blocked (Bottom-Up Safeguard): Downstream knockout match(es)
+                        <strong>${downstreamConflicts.map(c => c.matchNo).join(", ")}</strong> already have active status, scores, or official results.
+                        Reset downstream matches first before resetting <strong>${match.matchNo}</strong>.
+                       </div>`
+                    : `<div class="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-800 font-semibold">
+                        <i class="fa-solid fa-triangle-exclamation mr-1"></i> This will clear the score and official result for <strong>${match.matchNo}</strong> only, returning its status to <strong>Upcoming (Scheduled)</strong>.
+                       </div>`;
+
+                const modalButtons = hasDownstreamBlock
+                    ? [{ label: "Close", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() }]
+                    : [
                         { label: "Cancel", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() },
                         {
                             label: "Reset Match to Upcoming",
@@ -708,7 +829,19 @@
                                 await MatchEngine.executeResetMatch(match.id);
                             }
                         }
-                    ]
+                    ];
+
+                UI.showModal(
+                    `Confirm Reset Match (${match.matchNo})`,
+                    `<div class="space-y-3 text-xs">
+                        ${conflictWarningHtml}
+                        <div class="bg-navy-800 p-3.5 rounded-xl text-center">
+                            <div class="font-bold text-sm text-[#102C50]">${desc.homeTeam.name} <span class="text-slate-400 mx-1">(${match.homeScore} - ${match.awayScore})</span> ${desc.awayTeam.name}</div>
+                            <div class="text-[11px] text-slate-500 mt-1">${match.category} • ${match.stage} • ${match.pitch}</div>
+                        </div>
+                        <p class="text-slate-600">The fixture, tournament, teams, category, and scorekeeper assignment will remain intact. Standings and knockout slots will refresh automatically.</p>
+                    </div>`,
+                    modalButtons
                 );
             },
 
@@ -717,6 +850,13 @@
                 if (!SupabaseConfig.client) return;
                 const match = this.getMatch(matchId);
                 if (!match) return;
+
+                // Enforce bottom-up reset guard even if invoked directly
+                const downstreamConflicts = this.getDownstreamKnockoutConflicts(match);
+                if (downstreamConflicts.length > 0) {
+                    UI.toast(`Cannot reset ${match.matchNo}: reset downstream matches (${downstreamConflicts.map(c => c.matchNo).join(", ")}) first.`, "error");
+                    return;
+                }
 
                 const db = SupabaseConfig.client;
 
@@ -774,9 +914,12 @@
                 match.homeScore = 0;
                 match.awayScore = 0;
                 match.officialConfirmed = false;
+                match.extraTimeRequired = false;
+                match.adminReviewRequired = false;
+                match.adminReviewReason = "";
                 match.events = [];
 
-                // 4. Reload tournament data & reverse/recalculate standings and downstream knockout progression
+                // 4. Reload tournament data (read-only qualification sync during reload; never auto-persists)
                 await SupabaseData.loadTournamentByYear(match.edition);
                 AuthManager.logAudit(`Reset Match ${match.matchNo} (${match.id}) back to SCHEDULED / Upcoming`);
                 UI.toast(`Match ${match.matchNo} has been reset to Upcoming (0 - 0).`, "success");
@@ -901,8 +1044,14 @@
                     UI.toast("Only Admin or Super Admin can edit confirmed match scores.", "error");
                     return;
                 }
-                match.homeScore = Math.max(0, parseInt(homeScoreVal, 10) || 0);
-                match.awayScore = Math.max(0, parseInt(awayScoreVal, 10) || 0);
+                const parsedHome = this.parseStrictScore(homeScoreVal);
+                const parsedAway = this.parseStrictScore(awayScoreVal);
+                if (parsedHome === null || parsedAway === null || parsedHome < 0 || parsedAway < 0) {
+                    UI.toast("Enter valid non-negative integer scores for both teams.", "error");
+                    return;
+                }
+                match.homeScore = parsedHome;
+                match.awayScore = parsedAway;
                 if (match.status === "SCHEDULED") match.status = "LIVE";
                 App.renderCurrentPage();
                 const saved = await this.persistMatchStateToSupabase(match);
@@ -927,6 +1076,7 @@
                 UI.toast(`Reverted event: ${last.type} (${last.team}).`, "warning");
             },
 
+            // Confirm official match result; blocks tied knockout matches with EXTRA TIME REQUIRED
             confirmOfficialResult(matchId) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) return;
                 const match = this.getMatch(matchId);
@@ -935,16 +1085,33 @@
                     UI.toast("Pending Qualification – Waiting for qualified teams.", "warning");
                     return;
                 }
+
+                const hScore = this.parseStrictScore(match.homeScore);
+                const aScore = this.parseStrictScore(match.awayScore);
+                if (hScore === null || aScore === null) {
+                    UI.toast("Valid numeric scores are required before confirming official result.", "error");
+                    return;
+                }
+
+                const mNum = Number(match.matchNumberRaw);
+                const isKnockout = this.isKnockoutMatchNumber(mNum) || this.isKnockoutRound(match.roundName || match.stage, mNum);
+                if (isKnockout && hScore === aScore) {
+                    match.extraTimeRequired = true;
+                    UI.toast("EXTRA TIME REQUIRED – Tied knockout match cannot be confirmed as official while scores are equal.", "warning");
+                    App.renderCurrentPage();
+                    return;
+                }
+
                 const desc = this.getKnockoutDescriptor(match);
 
                 UI.showModal(
                     "Confirm & Publish Official Match Result",
                     `<p class="text-slate-600">Adakah anda pasti mahu mengunci skor dan mengesahkan keputusan rasmi bagi <strong>${match.matchNo}</strong>?</p>
                      <div class="bg-navy-800 p-4 rounded-xl border border-slate-200 text-center my-3">
-                        <div class="text-lg font-bold text-[#102C50]">${desc.homeTeam.name} <span class="text-pitch-400 mx-2">${match.homeScore} - ${match.awayScore}</span> ${desc.awayTeam.name}</div>
+                        <div class="text-lg font-bold text-[#102C50]">${desc.homeTeam.name} <span class="text-pitch-400 mx-2">${hScore} - ${aScore}</span> ${desc.awayTeam.name}</div>
                         <div class="text-xs text-slate-500 mt-1">${match.category} • ${match.stage}</div>
                      </div>
-                     <p class="text-xs text-emerald-700"><i class="fa-solid fa-database mr-1"></i> Keputusan akan disimpan ke jadual <code>matches</code> &amp; <code>match_results</code> serta mengemas kini kedudukan dan laluan knockout secara automatik.</p>`,
+                     <p class="text-xs text-emerald-700"><i class="fa-solid fa-database mr-1"></i> Keputusan akan disimpan ke jadual <code>matches</code> &amp; <code>match_results</code> serta mengisi slot kosong knockout secara automatik (tanpa menindih penetapan pasukan sedia ada).</p>`,
                     [
                         { label: "Cancel", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() },
                         {
@@ -952,17 +1119,19 @@
                             icon: "fa-circle-check",
                             style: "primary",
                             onClick: async () => {
+                                match.homeScore = hScore;
+                                match.awayScore = aScore;
                                 match.status = "FINAL";
                                 match.period = "FULL_TIME";
                                 match.timerRunning = false;
                                 match.officialConfirmed = true;
+                                match.extraTimeRequired = false;
                                 UI.closeModal();
                                 const saved = await this.persistMatchStateToSupabase(match);
                                 if (saved) {
-                                    // Automatically propagate qualified teams when pool/semi-final matches become FINAL
                                     await this.syncKnockoutQualificationFromStandings(match.edition, { persistToDb: true, silent: true });
                                     App.renderCurrentPage();
-                                    UI.toast(`Match ${match.matchNo} disahkan secara rasmi & jadual knockout dikemas kini!`, "success");
+                                    UI.toast(`Match ${match.matchNo} disahkan secara rasmi & slot kosong knockout dikemas kini!`, "success");
                                 } else {
                                     App.renderCurrentPage();
                                 }
@@ -989,14 +1158,17 @@
                 }
             },
 
+            /* -------------------- STANDINGS & TIE DETECTION -------------------- */
             // Calculate Standings Strictly Isolated by Category (and optionally Pool)
+            // Only includes matches where status === 'FINAL' and officialConfirmed === true (match_results.status === 'official')
             computeStandings(editionYear, categoryFilter, poolFilter = "ALL") {
                 if (!categoryFilter || categoryFilter === "ALL") return [];
 
+                const edYear = String(editionYear);
                 const editionTeams = TournamentStore.teams.filter(t =>
-                    t.edition === editionYear &&
+                    String(t.edition) === edYear &&
                     t.category === categoryFilter &&
-                    (poolFilter === "ALL" || t.pool === poolFilter)
+                    (poolFilter === "ALL" || this.normalizePoolLetter(t.pool) === this.normalizePoolLetter(poolFilter))
                 );
 
                 const table = {};
@@ -1015,11 +1187,10 @@
                     };
                 });
 
-                // Only include completed/final pool matches from the SAME edition and SAME category
                 const relevantMatches = this.matches.filter(m =>
-                    m.edition === editionYear &&
+                    String(m.edition) === edYear &&
                     m.category === categoryFilter &&
-                    m.status === "FINAL" &&
+                    this.isOfficiallyFinal(m) &&
                     !this.isKnockoutRound(m.roundName || m.stage, m.matchNumberRaw)
                 );
 
@@ -1028,28 +1199,32 @@
                     const awayRow = table[m.awayTeamId];
                     if (!homeRow || !awayRow) return;
 
+                    const hScore = this.parseStrictScore(m.homeScore);
+                    const aScore = this.parseStrictScore(m.awayScore);
+                    if (hScore === null || aScore === null) return;
+
                     homeRow.played += 1;
                     awayRow.played += 1;
-                    homeRow.pf += m.homeScore;
-                    homeRow.pa += m.awayScore;
-                    awayRow.pf += m.awayScore;
-                    awayRow.pa += m.homeScore;
+                    homeRow.pf += hScore;
+                    homeRow.pa += aScore;
+                    awayRow.pf += aScore;
+                    awayRow.pa += hScore;
 
                     const homeTries = (m.events || []).filter(e => e.side === "HOME" && e.type === "TRY").length;
                     const awayTries = (m.events || []).filter(e => e.side === "AWAY" && e.type === "TRY").length;
                     if (homeTries >= 4) homeRow.bp += 1;
                     if (awayTries >= 4) awayRow.bp += 1;
 
-                    if (m.homeScore > m.awayScore) {
+                    if (hScore > aScore) {
                         homeRow.won += 1;
                         awayRow.lost += 1;
                         homeRow.pts += 4;
-                        if ((m.homeScore - m.awayScore) <= 7) awayRow.bp += 1;
-                    } else if (m.awayScore > m.homeScore) {
+                        if ((hScore - aScore) <= 7) awayRow.bp += 1;
+                    } else if (aScore > hScore) {
                         awayRow.won += 1;
                         homeRow.lost += 1;
                         awayRow.pts += 4;
-                        if ((m.awayScore - m.homeScore) <= 7) homeRow.bp += 1;
+                        if ((aScore - hScore) <= 7) homeRow.bp += 1;
                     } else {
                         homeRow.drawn += 1;
                         awayRow.drawn += 1;
@@ -1065,6 +1240,30 @@
                 }).sort((a, b) => b.pts - a.pts || b.pd - a.pd || b.pf - a.pf || a.team.name.localeCompare(b.team.name));
             },
 
+            // Detect unresolved ties across PTS, PD, and PF at a boundary rank (e.g., 2nd/3rd or 4th/5th)
+            detectBoundaryTie(standingsRows, boundaryIndex) {
+                if (!Array.isArray(standingsRows) || standingsRows.length <= boundaryIndex) {
+                    return { hasTie: false, tiedTeams: [], boundaryRank: boundaryIndex + 1 };
+                }
+                const target = standingsRows[boundaryIndex];
+                if (!target || target.played === 0) {
+                    return { hasTie: false, tiedTeams: [], boundaryRank: boundaryIndex + 1 };
+                }
+
+                const tied = standingsRows.filter(r =>
+                    r.played > 0 &&
+                    r.pts === target.pts &&
+                    r.pd === target.pd &&
+                    r.pf === target.pf
+                );
+
+                return {
+                    hasTie: tied.length > 1,
+                    tiedTeams: tied.map(r => r.team),
+                    boundaryRank: boundaryIndex + 1
+                };
+            },
+
             isKnockoutRound(roundLabel, matchNumberRaw = null) {
                 const mNum = Number(matchNumberRaw);
                 if (mNum >= 13 && mNum <= 19) return true;
@@ -1072,186 +1271,481 @@
                 return r.includes("quarter") || r.includes("semi") || r.includes("final") || r.includes("cup") || r.includes("plate") || r.includes("bowl") || r.includes("shield") || r.includes("knockout") || r.includes("playoff");
             },
 
-            // Check whether every pool match in a given category has reached FINAL status
-            areAllPoolMatchesFinal(editionYear, categoryName) {
-                const poolMatches = this.matches.filter(m =>
-                    m.edition === editionYear &&
-                    m.category === categoryName &&
-                    !this.isKnockoutRound(m.roundName || m.stage, m.matchNumberRaw)
-                );
-                if (poolMatches.length === 0) return false;
-                return poolMatches.every(m => m.status === "FINAL");
+            /* -------------------- STRICT CONJUNCTIVE CANDIDATE & PREREQUISITE VALIDATION -------------------- */
+            selectStrictCandidates(editionMatches, edYear, expectedNumbers, rules = {}) {
+                const expectedSet = new Set(expectedNumbers);
+
+                return editionMatches.filter(m => {
+                    if (!m || String(m.edition) !== edYear) return false;
+                    if (rules.expectedCategoryId && m.categoryId !== rules.expectedCategoryId) return false;
+
+                    const rawNum = m.matchNumberRaw;
+                    if (rawNum === null || rawNum === undefined || String(rawNum).trim() === "") return false;
+                    const mNum = Number(rawNum);
+                    if (!Number.isInteger(mNum) || !expectedSet.has(mNum)) return false;
+
+                    const isKnockout = this.isKnockoutRound(m.roundName || m.stage, mNum);
+                    const hasPool = Boolean(String(m.poolName || "").trim());
+
+                    if (rules.requirePoolMatch) {
+                        if (!hasPool || isKnockout) return false;
+                        if (rules.expectedPoolLetter && this.normalizePoolLetter(m.poolName) !== rules.expectedPoolLetter.toLowerCase()) {
+                            return false;
+                        }
+                    } else if (rules.requireKnockoutRound) {
+                        if (!isKnockout) return false;
+                    }
+
+                    return true;
+                });
             },
 
-            // Automatically resolve & update existing knockout matches (Match 13–19)
-            // Rules:
-            //   Match 13 (U20 Semi Final 1): 1B vs 2A
-            //   Match 14 (U20 Semi Final 2): 1A vs 2B
-            //   Match 15 (U16 Plate Final): U16 3rd vs 4th
-            //   Match 16 (U20 Bowl Final): U20 3A vs 3B
-            //   Match 17 (U20 Plate Final): Loser SF1 (M13) vs Loser SF2 (M14)
-            //   Match 18 (U16 Cup Final): U16 1st vs 2nd
-            //   Match 19 (U20 Cup Final): Winner SF1 (M13) vs Winner SF2 (M14)
-            // Never creates or duplicates match rows; only updates home_team_id / away_team_id on existing rows
+            validateExactPrerequisiteSet(editionYear, expectedNumbers, candidateMatches, rules = {}) {
+                const edYear = String(editionYear || TournamentStore.activeEditionYear);
+
+                if (!Array.isArray(candidateMatches) || candidateMatches.length === 0) {
+                    return {
+                        ok: false,
+                        reason: `Missing prerequisite matches for edition ${edYear}. Expected exact set [${expectedNumbers.join(", ")}], found 0 matching records.`
+                    };
+                }
+
+                const seenNumbers = new Map();
+                for (const m of candidateMatches) {
+                    if (String(m.edition) !== edYear) {
+                        return { ok: false, reason: `Edition mismatch on match ${m.matchNumberRaw}: expected ${edYear}, got ${m.edition}.` };
+                    }
+                    if (rules.expectedCategoryId && m.categoryId !== rules.expectedCategoryId) {
+                        return { ok: false, reason: `Category mismatch on Match ${m.matchNumberRaw}: expected ${rules.expectedCategoryId}, got ${m.categoryId}.` };
+                    }
+
+                    const mNum = Number(m.matchNumberRaw);
+                    if (!Number.isInteger(mNum)) {
+                        return { ok: false, reason: `Invalid match_number (${String(m.matchNumberRaw)}) in prerequisite set.` };
+                    }
+                    if (seenNumbers.has(mNum)) {
+                        return { ok: false, reason: `Duplicate match_number ${mNum} found in prerequisite set.` };
+                    }
+                    seenNumbers.set(mNum, m);
+                }
+
+                for (const reqNum of expectedNumbers) {
+                    if (!seenNumbers.has(reqNum)) {
+                        return {
+                            ok: false,
+                            reason: `Incomplete prerequisite set: missing Match ${reqNum} (expected exact set [${expectedNumbers.join(", ")}]).`
+                        };
+                    }
+                }
+
+                if (seenNumbers.size !== expectedNumbers.length) {
+                    return {
+                        ok: false,
+                        reason: `Prerequisite count mismatch: expected ${expectedNumbers.length} ([${expectedNumbers.join(", ")}]), found ${seenNumbers.size}.`
+                    };
+                }
+
+                for (const reqNum of expectedNumbers) {
+                    const m = seenNumbers.get(reqNum);
+                    if (!this.hasValidScores(m)) {
+                        return { ok: false, reason: `Match ${reqNum} lacks valid numeric home/away scores.` };
+                    }
+                    if (!this.isOfficiallyFinal(m)) {
+                        return {
+                            ok: false,
+                            reason: `Match ${reqNum} is not officially final (requires status=FINAL and match_results.status='official').`
+                        };
+                    }
+                    if (rules.requireNonTied) {
+                        const hScore = this.parseStrictScore(m.homeScore);
+                        const aScore = this.parseStrictScore(m.awayScore);
+                        if (hScore === aScore) {
+                            return {
+                                ok: false,
+                                reason: `Semi-Final Match ${reqNum} ended tied (${hScore}-${aScore}); Extra Time required before qualification.`
+                            };
+                        }
+                    }
+                }
+
+                return { ok: true, reason: "", matchesByNumber: seenNumbers };
+            },
+
+            areKnockoutPrerequisitesOfficial(editionYear, knockoutMatch) {
+                const edYear = String(editionYear || TournamentStore.activeEditionYear);
+                const mNum = Number(knockoutMatch?.matchNumberRaw);
+                const editionMatches = this.matches.filter(m => String(m.edition) === edYear);
+
+                const U16_CAT_ID = this.CATEGORY_IDS.U16;
+                const U20_CAT_ID = this.CATEGORY_IDS.U20;
+
+                // Match 15 (U16 Plate Final) & Match 18 (U16 Cup Final) -> exact U16 pool matches [3, 4, 7, 8, 11, 12]
+                if (mNum === 15 || mNum === 18) {
+                    const u16PoolSet = this.PREREQUISITE_SETS.U16_POOL;
+                    const candidates = this.selectStrictCandidates(editionMatches, edYear, u16PoolSet, {
+                        expectedCategoryId: U16_CAT_ID,
+                        requirePoolMatch: true,
+                        requireKnockoutRound: false
+                    });
+                    return this.validateExactPrerequisiteSet(edYear, u16PoolSet, candidates, {
+                        expectedCategoryId: U16_CAT_ID,
+                        requireNonTied: false
+                    });
+                }
+
+                // Match 13 (U20 SF1), Match 14 (U20 SF2), Match 16 (U20 Bowl Final)
+                // -> exact U20 Pool A [2, 6, 10] AND exact U20 Pool B [1, 5, 9]
+                if (mNum === 13 || mNum === 14 || mNum === 16) {
+                    const poolASet = this.PREREQUISITE_SETS.U20_POOL_A;
+                    const poolBSet = this.PREREQUISITE_SETS.U20_POOL_B;
+
+                    const poolACandidates = this.selectStrictCandidates(editionMatches, edYear, poolASet, {
+                        expectedCategoryId: U20_CAT_ID,
+                        requirePoolMatch: true,
+                        expectedPoolLetter: "a",
+                        requireKnockoutRound: false
+                    });
+                    const resA = this.validateExactPrerequisiteSet(edYear, poolASet, poolACandidates, {
+                        expectedCategoryId: U20_CAT_ID,
+                        requireNonTied: false
+                    });
+                    if (!resA.ok) {
+                        return { ok: false, reason: `U20 Pool A prerequisite check failed: ${resA.reason}` };
+                    }
+
+                    const poolBCandidates = this.selectStrictCandidates(editionMatches, edYear, poolBSet, {
+                        expectedCategoryId: U20_CAT_ID,
+                        requirePoolMatch: true,
+                        expectedPoolLetter: "b",
+                        requireKnockoutRound: false
+                    });
+                    const resB = this.validateExactPrerequisiteSet(edYear, poolBSet, poolBCandidates, {
+                        expectedCategoryId: U20_CAT_ID,
+                        requireNonTied: false
+                    });
+                    if (!resB.ok) {
+                        return { ok: false, reason: `U20 Pool B prerequisite check failed: ${resB.reason}` };
+                    }
+
+                    return { ok: true, reason: "" };
+                }
+
+                // Match 17 (U20 Plate Final) & Match 19 (U20 Cup Final) -> exact U20 Semi-Finals [13, 14], non-tied
+                if (mNum === 17 || mNum === 19) {
+                    const sfSet = this.PREREQUISITE_SETS.U20_SEMI_FINALS;
+                    const sfCandidates = this.selectStrictCandidates(editionMatches, edYear, sfSet, {
+                        expectedCategoryId: U20_CAT_ID,
+                        requirePoolMatch: false,
+                        requireKnockoutRound: true
+                    });
+                    return this.validateExactPrerequisiteSet(edYear, sfSet, sfCandidates, {
+                        expectedCategoryId: U20_CAT_ID,
+                        requireNonTied: true
+                    });
+                }
+
+                return {
+                    ok: false,
+                    reason: `Unrecognized knockout fixture match_number (${knockoutMatch?.matchNumberRaw ?? "missing"}).`
+                };
+            },
+
+            // Compute & optionally persist qualification slots for existing knockout matches (Match 13–19).
+            // Safety rules enforced:
+            // - Never overwrite any existing non-null home_team_id or away_team_id during qualification sync.
+            // - Automatic qualification may fill ONLY currently NULL team slots.
+            // - If calculated qualification differs from existing non-null assignments (or when boundary ties /
+            //   changed standings occur on a slot with an existing assignment), preserve existing IDs and flag
+            //   the fixture as ADMIN REVIEW REQUIRED without silently clearing existing assignments.
+            // - Persistence to Supabase (`options.persistToDb === true`) is permitted ONLY when explicitly
+            //   triggered by Confirm & Publish Official Result or Admin/Super Admin Sync. Page loads, refreshes,
+            //   edition switches, and session restores MUST pass `persistToDb: false`.
             async syncKnockoutQualificationFromStandings(editionYear, options = {}) {
                 const edYear = String(editionYear || TournamentStore.activeEditionYear);
-                const editionMatches = this.matches.filter(m => m.edition === edYear);
+                const editionMatches = this.matches.filter(m => String(m.edition) === edYear);
                 if (editionMatches.length === 0) return 0;
 
+                const persistRequested = Boolean(options.persistToDb);
                 const canWriteToSupabase = Boolean(
-                    options.persistToDb &&
+                    persistRequested &&
                     SupabaseConfig.client &&
                     AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])
                 );
 
                 const byNum = (num) => editionMatches.find(m => Number(m.matchNumberRaw) === Number(num)) || null;
                 const winnerOf = (m) => {
-                    if (!m || m.status !== "FINAL" || !m.homeTeamId || !m.awayTeamId || m.homeScore === m.awayScore) return null;
-                    return m.homeScore > m.awayScore ? m.homeTeamId : m.awayTeamId;
+                    if (!m || !this.isOfficiallyFinal(m) || !m.homeTeamId || !m.awayTeamId) return null;
+                    const h = this.parseStrictScore(m.homeScore);
+                    const a = this.parseStrictScore(m.awayScore);
+                    if (h === null || a === null || h === a) return null;
+                    return h > a ? m.homeTeamId : m.awayTeamId;
                 };
                 const loserOf = (m) => {
-                    if (!m || m.status !== "FINAL" || !m.homeTeamId || !m.awayTeamId || m.homeScore === m.awayScore) return null;
-                    return m.homeScore > m.awayScore ? m.awayTeamId : m.homeTeamId;
+                    if (!m || !this.isOfficiallyFinal(m) || !m.homeTeamId || !m.awayTeamId) return null;
+                    const h = this.parseStrictScore(m.homeScore);
+                    const a = this.parseStrictScore(m.awayScore);
+                    if (h === null || a === null || h === a) return null;
+                    return h > a ? m.awayTeamId : m.homeTeamId;
                 };
 
-                // Helper: get Pool standings by category & pool letter ('A' or 'B')
-                const getPoolRanking = (catName, poolLetter) => {
+                const getPoolStandingsRows = (catName, poolLetter) => {
                     if (!catName) return [];
-                    const catTeams = TournamentStore.teams.filter(t => t.edition === edYear && t.category === catName);
+                    const catTeams = TournamentStore.teams.filter(t => String(t.edition) === edYear && t.category === catName);
                     const matchingPoolName = [...new Set(catTeams.map(t => t.pool).filter(Boolean))]
-                        .find(p => p.toLowerCase().endsWith(poolLetter.toLowerCase()) || p.toLowerCase() === `pool ${poolLetter.toLowerCase()}`);
+                        .find(p => this.normalizePoolLetter(p) === poolLetter.toLowerCase());
                     if (!matchingPoolName) return [];
-                    return this.computeStandings(edYear, catName, matchingPoolName).map(r => r.team.id);
+                    return this.computeStandings(edYear, catName, matchingPoolName);
                 };
 
-                // Helper: get overall category standings (e.g., U16 single table 1st, 2nd, 3rd, 4th)
-                const getOverallCategoryRanking = (catName) => {
+                const getOverallCategoryRows = (catName) => {
                     if (!catName) return [];
-                    return this.computeStandings(edYear, catName, "ALL").map(r => r.team.id);
+                    return this.computeStandings(edYear, catName, "ALL");
                 };
 
-                const categories = [...new Set(TournamentStore.teams.filter(t => t.edition === edYear).map(t => t.category).filter(Boolean))];
-                const u20Cat = categories.find(c => /u20|under\s*20|open|men/i.test(c)) || categories[0] || "";
-                const u16Cat = categories.find(c => /u16|under\s*16|junior/i.test(c)) || categories[1] || "";
+                const categories = [...new Set(TournamentStore.teams.filter(t => String(t.edition) === edYear).map(t => t.category).filter(Boolean))];
+                const u20Cat = (TournamentStore.editions[edYear]?.categories || []).find(c => c.id === this.CATEGORY_IDS.U20)?.name
+                    || categories.find(c => /u20|under\s*20|open|men/i.test(c))
+                    || categories[0] || "";
+                const u16Cat = (TournamentStore.editions[edYear]?.categories || []).find(c => c.id === this.CATEGORY_IDS.U16)?.name
+                    || categories.find(c => /u16|under\s*16|junior/i.test(c))
+                    || categories[1] || "";
 
                 const desiredAssignments = {};
+                const tieNotesByMatch = {};
 
                 // Match 13: U20 Semi Final 1 — 1B vs 2A
                 const m13 = byNum(13);
                 if (m13) {
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m13);
                     const cat13 = m13.category || u20Cat;
-                    const pool13Ready = this.areAllPoolMatchesFinal(edYear, cat13);
-                    const pA = pool13Ready ? getPoolRanking(cat13, "A") : [];
-                    const pB = pool13Ready ? getPoolRanking(cat13, "B") : [];
-                    desiredAssignments[m13.id] = (pool13Ready && pB[0] && pA[1])
-                        ? { home: pB[0], away: pA[1] }
-                        : { home: null, away: null };
+                    const rowsA = prereq.ok ? getPoolStandingsRows(cat13, "A") : [];
+                    const rowsB = prereq.ok ? getPoolStandingsRows(cat13, "B") : [];
+                    const tieA = this.detectBoundaryTie(rowsA, 1);
+                    const tieB = this.detectBoundaryTie(rowsB, 0);
+                    const homeId = (!tieB.hasTie && rowsB[0]) ? rowsB[0].team.id : null;
+                    const awayId = (!tieA.hasTie && rowsA[1]) ? rowsA[1].team.id : null;
+                    desiredAssignments[m13.id] = { home: homeId, away: awayId };
+                    const notes = [];
+                    if (tieB.hasTie) notes.push(`Boundary tie at U20 Pool B Rank 1 (${tieB.tiedTeams.map(t => t.name).join(", ")})`);
+                    if (tieA.hasTie) notes.push(`Boundary tie at U20 Pool A Rank 2 (${tieA.tiedTeams.map(t => t.name).join(", ")})`);
+                    tieNotesByMatch[m13.id] = notes;
                 }
 
                 // Match 14: U20 Semi Final 2 — 1A vs 2B
                 const m14 = byNum(14);
                 if (m14) {
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m14);
                     const cat14 = m14.category || u20Cat;
-                    const pool14Ready = this.areAllPoolMatchesFinal(edYear, cat14);
-                    const pA = pool14Ready ? getPoolRanking(cat14, "A") : [];
-                    const pB = pool14Ready ? getPoolRanking(cat14, "B") : [];
-                    desiredAssignments[m14.id] = (pool14Ready && pA[0] && pB[1])
-                        ? { home: pA[0], away: pB[1] }
-                        : { home: null, away: null };
+                    const rowsA = prereq.ok ? getPoolStandingsRows(cat14, "A") : [];
+                    const rowsB = prereq.ok ? getPoolStandingsRows(cat14, "B") : [];
+                    const tieA = this.detectBoundaryTie(rowsA, 0);
+                    const tieB = this.detectBoundaryTie(rowsB, 1);
+                    const homeId = (!tieA.hasTie && rowsA[0]) ? rowsA[0].team.id : null;
+                    const awayId = (!tieB.hasTie && rowsB[1]) ? rowsB[1].team.id : null;
+                    desiredAssignments[m14.id] = { home: homeId, away: awayId };
+                    const notes = [];
+                    if (tieA.hasTie) notes.push(`Boundary tie at U20 Pool A Rank 1 (${tieA.tiedTeams.map(t => t.name).join(", ")})`);
+                    if (tieB.hasTie) notes.push(`Boundary tie at U20 Pool B Rank 2 (${tieB.tiedTeams.map(t => t.name).join(", ")})`);
+                    tieNotesByMatch[m14.id] = notes;
                 }
 
                 // Match 15: U16 Plate Final — U16 3rd vs 4th
                 const m15 = byNum(15);
                 if (m15) {
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m15);
                     const cat15 = m15.category || u16Cat;
-                    const pool15Ready = this.areAllPoolMatchesFinal(edYear, cat15);
-                    const u16Rank = pool15Ready ? getOverallCategoryRanking(cat15) : [];
-                    desiredAssignments[m15.id] = (pool15Ready && u16Rank[2] && u16Rank[3])
-                        ? { home: u16Rank[2], away: u16Rank[3] }
-                        : { home: null, away: null };
+                    const u16Rows = prereq.ok ? getOverallCategoryRows(cat15) : [];
+                    const tieAt3 = this.detectBoundaryTie(u16Rows, 2);
+                    const tieAt4 = this.detectBoundaryTie(u16Rows, 3);
+                    const homeId = (!tieAt3.hasTie && u16Rows[2]) ? u16Rows[2].team.id : null;
+                    const awayId = (!tieAt4.hasTie && u16Rows[3]) ? u16Rows[3].team.id : null;
+                    desiredAssignments[m15.id] = { home: homeId, away: awayId };
+                    const notes = [];
+                    if (tieAt3.hasTie) notes.push(`Boundary tie at U16 Rank 3 (${tieAt3.tiedTeams.map(t => t.name).join(", ")})`);
+                    if (tieAt4.hasTie) notes.push(`Boundary tie at U16 Rank 4 (${tieAt4.tiedTeams.map(t => t.name).join(", ")})`);
+                    tieNotesByMatch[m15.id] = notes;
                 }
 
                 // Match 16: U20 Bowl Final — U20 3A vs 3B
                 const m16 = byNum(16);
                 if (m16) {
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m16);
                     const cat16 = m16.category || u20Cat;
-                    const pool16Ready = this.areAllPoolMatchesFinal(edYear, cat16);
-                    const pA = pool16Ready ? getPoolRanking(cat16, "A") : [];
-                    const pB = pool16Ready ? getPoolRanking(cat16, "B") : [];
-                    desiredAssignments[m16.id] = (pool16Ready && pA[2] && pB[2])
-                        ? { home: pA[2], away: pB[2] }
-                        : { home: null, away: null };
+                    const rowsA = prereq.ok ? getPoolStandingsRows(cat16, "A") : [];
+                    const rowsB = prereq.ok ? getPoolStandingsRows(cat16, "B") : [];
+                    const tieA = this.detectBoundaryTie(rowsA, 2);
+                    const tieB = this.detectBoundaryTie(rowsB, 2);
+                    const homeId = (!tieA.hasTie && rowsA[2]) ? rowsA[2].team.id : null;
+                    const awayId = (!tieB.hasTie && rowsB[2]) ? rowsB[2].team.id : null;
+                    desiredAssignments[m16.id] = { home: homeId, away: awayId };
+                    const notes = [];
+                    if (tieA.hasTie) notes.push(`Boundary tie at U20 Pool A Rank 3 (${tieA.tiedTeams.map(t => t.name).join(", ")})`);
+                    if (tieB.hasTie) notes.push(`Boundary tie at U20 Pool B Rank 3 (${tieB.tiedTeams.map(t => t.name).join(", ")})`);
+                    tieNotesByMatch[m16.id] = notes;
                 }
 
                 // Match 17: U20 Plate Final — Loser SF1 (M13) vs Loser SF2 (M14)
                 const m17 = byNum(17);
                 if (m17) {
-                    const l13 = loserOf(m13);
-                    const l14 = loserOf(m14);
-                    desiredAssignments[m17.id] = {
-                        home: l13 || null,
-                        away: l14 || null
-                    };
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m17);
+                    desiredAssignments[m17.id] = prereq.ok
+                        ? { home: loserOf(m13) || null, away: loserOf(m14) || null }
+                        : { home: null, away: null };
+                    tieNotesByMatch[m17.id] = [];
                 }
 
                 // Match 18: U16 Cup Final — U16 1st vs 2nd
                 const m18 = byNum(18);
                 if (m18) {
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m18);
                     const cat18 = m18.category || u16Cat;
-                    const pool18Ready = this.areAllPoolMatchesFinal(edYear, cat18);
-                    const u16Rank = pool18Ready ? getOverallCategoryRanking(cat18) : [];
-                    desiredAssignments[m18.id] = (pool18Ready && u16Rank[0] && u16Rank[1])
-                        ? { home: u16Rank[0], away: u16Rank[1] }
-                        : { home: null, away: null };
+                    const u16Rows = prereq.ok ? getOverallCategoryRows(cat18) : [];
+                    const tieAt1 = this.detectBoundaryTie(u16Rows, 0);
+                    const tieAt2 = this.detectBoundaryTie(u16Rows, 1);
+                    const homeId = (!tieAt1.hasTie && u16Rows[0]) ? u16Rows[0].team.id : null;
+                    const awayId = (!tieAt2.hasTie && u16Rows[1]) ? u16Rows[1].team.id : null;
+                    desiredAssignments[m18.id] = { home: homeId, away: awayId };
+                    const notes = [];
+                    if (tieAt1.hasTie) notes.push(`Boundary tie at U16 Rank 1 (${tieAt1.tiedTeams.map(t => t.name).join(", ")})`);
+                    if (tieAt2.hasTie) notes.push(`Boundary tie at U16 Rank 2 (${tieAt2.tiedTeams.map(t => t.name).join(", ")})`);
+                    tieNotesByMatch[m18.id] = notes;
                 }
 
                 // Match 19: U20 Cup Final — Winner SF1 (M13) vs Winner SF2 (M14)
                 const m19 = byNum(19);
                 if (m19) {
-                    const w13 = winnerOf(m13);
-                    const w14 = winnerOf(m14);
-                    desiredAssignments[m19.id] = {
-                        home: w13 || null,
-                        away: w14 || null
-                    };
+                    const prereq = this.areKnockoutPrerequisitesOfficial(edYear, m19);
+                    desiredAssignments[m19.id] = prereq.ok
+                        ? { home: winnerOf(m13) || null, away: winnerOf(m14) || null }
+                        : { home: null, away: null };
+                    tieNotesByMatch[m19.id] = [];
                 }
 
                 let updatedCount = 0;
                 for (const match of editionMatches) {
                     const target = desiredAssignments[match.id];
                     if (!target) continue;
-                    // Do not overwrite already started/finished matches
-                    if (match.status !== "SCHEDULED") continue;
 
-                    const nextHome = target.home ?? null;
-                    const nextAway = target.away ?? null;
-                    if (nextHome === (match.homeTeamId ?? null) && nextAway === (match.awayTeamId ?? null)) continue;
+                    const currentHome = match.homeTeamId ?? null;
+                    const currentAway = match.awayTeamId ?? null;
+                    const computedHome = target.home ?? null;
+                    const computedAway = target.away ?? null;
+                    const tieNotes = tieNotesByMatch[match.id] || [];
+                    const prerequisiteCheck =
+                        this.areKnockoutPrerequisitesOfficial(edYear, match);
 
-                    match.homeTeamId = nextHome;
-                    match.awayTeamId = nextAway;
-                    updatedCount++;
+                    // Never clear or overwrite existing non-null team IDs.
+                    // Persist review status only during an explicit sync/result-confirmation action.
+                    const homeHasExisting = currentHome !== null;
+                    const awayHasExisting = currentAway !== null;
+
+                    const homeDiffersFromComputed = homeHasExisting && computedHome !== null && computedHome !== currentHome;
+                    const awayDiffersFromComputed = awayHasExisting && computedAway !== null && computedAway !== currentAway;
+                    const homeTieOnExisting = homeHasExisting && computedHome === null && tieNotes.length > 0;
+                    const awayTieOnExisting = awayHasExisting && computedAway === null && tieNotes.length > 0;
+
+                    if (match.manualOverride === true) {
+                        match.adminReviewRequired = false;
+                        match.adminReviewReason = "";
+                    } else if (
+                        !prerequisiteCheck.ok &&
+                        (homeHasExisting || awayHasExisting)
+                    ) {
+                        match.adminReviewRequired = true;
+                        match.adminReviewReason =
+                            "Prerequisite verification failed: " + prerequisiteCheck.reason;
+                    } else if (
+                        homeDiffersFromComputed ||
+                        awayDiffersFromComputed ||
+                        homeTieOnExisting ||
+                        awayTieOnExisting
+                    ) {
+                        const reasons = [];
+
+                        if (homeDiffersFromComputed) {
+                            reasons.push(
+                                `Home slot has ${this.getTeam(currentHome).name}, calculated slot is ${this.getTeam(computedHome).name}`
+                            );
+                        }
+
+                        if (awayDiffersFromComputed) {
+                            reasons.push(
+                                `Away slot has ${this.getTeam(currentAway).name}, calculated slot is ${this.getTeam(computedAway).name}`
+                            );
+                        }
+
+                        if (homeTieOnExisting || awayTieOnExisting) {
+                            reasons.push(...tieNotes);
+                        }
+
+                        match.adminReviewRequired = true;
+                        match.adminReviewReason = reasons.join(" • ");
+                    } else if (!homeHasExisting && !awayHasExisting) {
+                        match.adminReviewRequired = false;
+                        match.adminReviewReason = "";
+                    } else if (
+                        (!homeHasExisting || computedHome === null || computedHome === currentHome) &&
+                        (!awayHasExisting || computedAway === null || computedAway === currentAway) &&
+                        tieNotes.length === 0
+                    ) {
+                        match.adminReviewRequired = false;
+                        match.adminReviewReason = "";
+                    }
+
+                    const canFillSlots = match.status === "SCHEDULED";
+
+                    const resolvedHome = canFillSlots
+                        ? (homeHasExisting ? currentHome : computedHome)
+                        : currentHome;
+
+                    const resolvedAway = canFillSlots
+                        ? (awayHasExisting ? currentAway : computedAway)
+                        : currentAway;
+
+                    const slotsChanged =
+                        resolvedHome !== currentHome ||
+                        resolvedAway !== currentAway;
+
+                    if (slotsChanged) {
+                        match.homeTeamId = resolvedHome;
+                        match.awayTeamId = resolvedAway;
+                        updatedCount++;
+                    }
 
                     if (canWriteToSupabase) {
+                        const updatePayload = {
+                            manual_override: Boolean(match.manualOverride),
+                            admin_review_required: Boolean(match.adminReviewRequired),
+                            admin_review_reason: match.adminReviewReason || ""
+                        };
+
+                        if (slotsChanged) {
+                            updatePayload.home_team_id = resolvedHome;
+                            updatePayload.away_team_id = resolvedAway;
+                        }
+
                         const { error } = await SupabaseConfig.client
                             .from("matches")
-                            .update({
-                                home_team_id: nextHome,
-                                away_team_id: nextAway
-                            })
+                            .update(updatePayload)
                             .eq("id", match.id);
+
                         if (error) {
-                            console.error(`Ralat mengemas kini slot pasukan Match ${match.matchNo}:`, error);
+                            console.error(
+                                `Ralat menyimpan status kelayakan Match ${match.matchNo}:`,
+                                error
+                            );
                         }
                     }
                 }
 
-                if (updatedCount > 0 && !options.silent) {
-                    AuthManager.logAudit(`Auto-updated ${updatedCount} knockout fixture(s) from confirmed Pool/Semi-Final results`);
+                if (updatedCount > 0 && canWriteToSupabase && !options.silent) {
+                    AuthManager.logAudit(`Filled ${updatedCount} empty knockout slot(s) from officially confirmed results (existing team IDs preserved)`);
                 }
                 return updatedCount;
             },
 
-            // Advance qualified teams from Pool Standings or Knockout Winners into Next Round Matches
+            // Advance qualified teams into currently NULL knockout slots while preserving existing assignments
+            // Explicitly restricted to SUPER_ADMIN or ADMIN role and persists only when explicitly invoked
             async advanceQualifiedTeams(categoryName) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) {
                     UI.toast("Hanya Admin atau Super Admin boleh mengemas kini laluan bracket.", "error");
@@ -1259,36 +1753,71 @@
                 }
                 const edYear = TournamentStore.activeEditionYear;
                 const updatedCount = await this.syncKnockoutQualificationFromStandings(edYear, { persistToDb: true, silent: false });
+                const reviewMatches = this.matches.filter(m => String(m.edition) === String(edYear) && m.adminReviewRequired);
 
-                if (updatedCount > 0) {
-                    UI.toast(`${updatedCount} perlawanan pusingan seterusnya telah dikemas kini secara automatik!`, "success");
-                    App.renderCurrentPage();
+                if (updatedCount > 0 && reviewMatches.length > 0) {
+                    UI.toast(`${updatedCount} slot kosong dikemas kini; ${reviewMatches.length} perlawanan ditandakan ADMIN REVIEW REQUIRED (pasukan sedia ada dikekalkan).`, "warning");
+                } else if (updatedCount > 0) {
+                    UI.toast(`${updatedCount} slot kosong pusingan seterusnya telah dikemas kini secara automatik!`, "success");
+                } else if (reviewMatches.length > 0) {
+                    UI.toast(`${reviewMatches.length} perlawanan ditandakan ADMIN REVIEW REQUIRED – semak melalui Set Teams tanpa menindih pasukan sedia ada.`, "warning");
                 } else {
-                    UI.toast(`Semua perlawanan kumpulan dalam ${categoryName || "kategori ini"} mesti berstatus FINAL sebelum pasukan layak diisi.`, "info");
+                    UI.toast(`Semakan selesai: tiada slot kosong baru untuk diisi (pasukan sedia ada dikekalkan).`, "info");
                 }
+                App.renderCurrentPage();
             },
 
             async assignTeamsToKnockoutMatch(matchId, homeTeamId, awayTeamId) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) return;
+
                 const match = this.getMatch(matchId);
                 if (!match) return;
+
+                const nextHome = homeTeamId || null;
+                const nextAway = awayTeamId || null;
+
+                if (!nextHome || !nextAway) {
+                    UI.toast(
+                        "Sila pilih kedua-dua pasukan sebelum mengesahkan.",
+                        "warning"
+                    );
+                    return;
+                }
 
                 const { error } = await SupabaseConfig.client
                     .from("matches")
                     .update({
-                        home_team_id: homeTeamId || null,
-                        away_team_id: awayTeamId || null
+                        home_team_id: nextHome,
+                        away_team_id: nextAway,
+                        manual_override: true,
+                        admin_review_required: false,
+                        admin_review_reason: ""
                     })
                     .eq("id", matchId);
 
                 if (error) {
-                    UI.toast("Gagal mengemas kini pasukan bracket: " + error.message, "error");
+                    UI.toast(
+                        "Gagal menyimpan pengesahan Admin: " + error.message,
+                        "error"
+                    );
                     return;
                 }
-                match.homeTeamId = homeTeamId || null;
-                match.awayTeamId = awayTeamId || null;
-                AuthManager.logAudit(`Assigned bracket teams for ${match.matchNo}`);
-                UI.toast(`Pasukan perlawanan ${match.matchNo} berjaya dikemas kini dalam Supabase.`, "success");
+
+                match.homeTeamId = nextHome;
+                match.awayTeamId = nextAway;
+                match.manualOverride = true;
+                match.adminReviewRequired = false;
+                match.adminReviewReason = "";
+
+                AuthManager.logAudit(
+                    `Admin reviewed & confirmed teams via Set Teams for ${match.matchNo}`
+                );
+
+                UI.toast(
+                    `Pasukan ${match.matchNo} disahkan oleh Admin dan disimpan dalam Supabase.`,
+                    "success"
+                );
+
                 App.renderCurrentPage();
             }
         };
@@ -1374,7 +1903,7 @@
                 }
 
                 const edYear = String(tournament.year);
-                const matchSelectColumns = "id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, match_duration_minutes, half_duration_minutes, home_team_id, away_team_id, home_label, away_label, scorekeeper_id";
+                const matchSelectColumns = "id, tournament_id, category_id, match_number, pool_name, round_name, pitch_name, scheduled_at, status, match_duration_minutes, half_duration_minutes, home_team_id, away_team_id, home_label, away_label, scorekeeper_id, manual_override, admin_review_required, admin_review_reason";
 
                 const [catQ, teamQ, poolQ, matchQ, playerQ] = await Promise.all([
                     db.from("categories").select("*").eq("tournament_id", tournament.id).order("name"),
@@ -1492,6 +2021,15 @@
                     };
                     const totalMatchMinutes = Number(m.match_duration_minutes) || ((Number(m.half_duration_minutes) || 6) * 2);
                     const halfMinutes = Number(m.half_duration_minutes) || Math.max(1, Math.round(totalMatchMinutes / 2));
+                    const mappedStatus = stateMap[normalizedDbStatus] || "SCHEDULED";
+                    const normalizedResultStatus = String(result?.status || "").toLowerCase();
+                    const isOfficialConfirmed = normalizedResultStatus === "official";
+                    const parsedHomeScore = MatchEngine.parseStrictScore(result?.home_score);
+                    const parsedAwayScore = MatchEngine.parseStrictScore(result?.away_score);
+                    const finalHomeScore = parsedHomeScore !== null ? parsedHomeScore : 0;
+                    const finalAwayScore = parsedAwayScore !== null ? parsedAwayScore : 0;
+                    const mNum = Number(m.match_number);
+                    const isKnockout = MatchEngine.isKnockoutMatchNumber(mNum) || MatchEngine.isKnockoutRound(m.round_name, mNum);
 
                     return {
                         id: m.id,
@@ -1506,7 +2044,7 @@
                         pitch: m.pitch_name || "Pitch 1",
                         kickoff: local.kickoff || "TBD",
                         date: local.date || tournament.start_date || "",
-                        status: stateMap[normalizedDbStatus] || "SCHEDULED",
+                        status: mappedStatus,
                         period: periodMap[normalizedDbStatus] || "FIRST_HALF",
                         elapsedSeconds: 0,
                         matchDurationMinutes: totalMatchMinutes,
@@ -1516,11 +2054,21 @@
                         awayTeamId: m.away_team_id,
                         homeLabel: m.home_label || "",
                         awayLabel: m.away_label || "",
-                        homeScore: result?.home_score ?? 0,
-                        awayScore: result?.away_score ?? 0,
+                        homeScore: finalHomeScore,
+                        awayScore: finalAwayScore,
                         scorekeeperId: m.scorekeeper_id || null,
                         assignedScorekeeper: m.scorekeeper_id || "Unassigned",
-                        officialConfirmed: ["confirmed", "official"].includes(String(result?.status || "").toLowerCase()),
+                        officialConfirmed: isOfficialConfirmed,
+                        extraTimeRequired: Boolean(
+                            isKnockout &&
+                            ["LIVE", "FINAL"].includes(mappedStatus) &&
+                            parsedHomeScore !== null &&
+                            parsedAwayScore !== null &&
+                            parsedHomeScore === parsedAwayScore
+                        ),
+                        manualOverride: Boolean(m.manual_override),
+                        adminReviewRequired: Boolean(m.admin_review_required),
+                        adminReviewReason: m.admin_review_reason || "",
                         events: []
                     };
                 });
@@ -1565,8 +2113,8 @@
                 };
 
                 MatchEngine.matches = MatchEngine.matches.filter(m => m.edition !== edYear).concat(mappedMatches);
-                // Sync knockout team names automatically if pool/semi-final matches are already FINAL
-                await MatchEngine.syncKnockoutQualificationFromStandings(edYear, { persistToDb: true, silent: true });
+                // Strictly read-only qualification evaluation during load/refresh/edition switch; never writes to Supabase
+                await MatchEngine.syncKnockoutQualificationFromStandings(edYear, { persistToDb: false, silent: true });
 
                 if (!MatchEngine.matches.some(m => m.id === MatchEngine.selectedMatchId)) {
                     MatchEngine.selectedMatchId = mappedMatches[0]?.id || null;
@@ -1891,7 +2439,6 @@
                     { id: "live_console", label: "Live Match Scorekeeper Console", icon: "fa-stopwatch" },
                     { id: "security", label: "Activity & Security Logs", icon: "fa-shield-halved" }
                 ];
-                // Normalize legacy 'fixtures' tab id to 'matches_admin' for Super Admin
                 if (this.activeTab === "fixtures") this.activeTab = "matches_admin";
                 if (!tabs.some(t => t.id === this.activeTab)) this.activeTab = "overview";
 
@@ -2292,7 +2839,7 @@
                                             <i class="fa-solid fa-diagram-project text-gold-400"></i>
                                             Knockout Bracket &amp; Qualification Progression
                                         </h3>
-                                        <p class="text-xs text-slate-400 mt-0.5">Kemas kini pasukan yang layak daripada kedudukan kumpulan (FINAL) dan keputusan Semi Final ke Match 13–19.</p>
+                                        <p class="text-xs text-slate-400 mt-0.5">Isi slot kosong knockout sahaja; pasukan sedia ada tidak ditindih dan sebarang perbezaan ditandakan <strong>ADMIN REVIEW REQUIRED</strong>.</p>
                                     </div>
                                     <div class="flex flex-wrap items-center gap-2">
                                         <select id="bracket-cat-select" class="bg-navy-950 border border-white/15 rounded-xl px-3 py-2 text-xs font-semibold text-white">
@@ -2322,17 +2869,21 @@
                                             <tbody>
                                                 ${matches.length === 0 ? `<tr><td colspan="6" class="p-4 text-center text-slate-400">No fixtures found.</td></tr>` : matches.map(m => {
                                                     const desc = MatchEngine.getKnockoutDescriptor(m);
+                                                    const needsExtraTime = MatchEngine.isExtraTimeRequired(m);
                                                     return `
                                                     <tr>
                                                         <td class="p-3 font-bold text-pitch-400">${m.matchNo}<div class="text-[11px] text-slate-400 font-normal">${m.pitch} • ${m.kickoff}</div></td>
                                                         <td class="p-3 text-xs">
                                                             <div class="font-semibold text-white">${m.category}</div>
                                                             <div class="text-slate-400">${desc.isPendingQualification ? desc.pendingBanner : m.stage}</div>
+                                                            ${desc.adminReviewRequired ? `<div class="mt-1 text-[10px] font-bold text-amber-800 bg-amber-500/20 px-2 py-0.5 rounded inline-block">ADMIN REVIEW REQUIRED${desc.reviewReason ? `: ${Views.escapeHtml(desc.reviewReason)}` : ''}</div>` : ''}
                                                         </td>
                                                         <td class="p-3 font-medium text-white">${desc.homeTeam.name} <span class="text-slate-400 text-xs">vs</span> ${desc.awayTeam.name}</td>
                                                         <td class="p-3 text-center font-sport text-lg font-bold text-gold-400">${m.homeScore} - ${m.awayScore}</td>
                                                         <td class="p-3 text-xs font-bold">
-                                                            <span class="px-2 py-0.5 rounded ${m.status === 'FINAL' ? 'bg-emerald-500/20 text-emerald-700' : m.status === 'LIVE' ? 'bg-red-500/20 text-red-700' : 'bg-slate-200 text-slate-700'}">${m.status}</span>
+                                                            <span class="px-2 py-0.5 rounded ${m.status === 'FINAL' && m.officialConfirmed ? 'bg-emerald-500/20 text-emerald-700' : m.status === 'FINAL' ? 'bg-amber-500/20 text-amber-800' : m.status === 'LIVE' ? 'bg-red-500/20 text-red-700' : 'bg-slate-200 text-slate-700'}">${m.status === 'FINAL' && !m.officialConfirmed ? 'FINAL (DRAFT)' : m.status}</span>
+                                                            ${needsExtraTime ? `<span class="ml-1 px-2 py-0.5 rounded bg-orange-500/20 text-orange-800 text-[10px]">EXTRA TIME REQUIRED</span>` : ''}
+                                                            ${desc.adminReviewRequired ? `<span class="ml-1 px-2 py-0.5 rounded bg-amber-500/25 text-amber-900 border border-amber-500/40 text-[10px]">ADMIN REVIEW REQUIRED</span>` : ''}
                                                         </td>
                                                         <td class="p-3 text-right">
                                                             <div class="inline-flex flex-wrap justify-end gap-1.5">
@@ -2479,6 +3030,7 @@
                     : (resolvedMatches[0] || assignedMatches[0]);
                 MatchEngine.selectedMatchId = activeMatch.id;
                 const isUnresolved = MatchEngine.isMatchUnresolved(activeMatch);
+                const needsExtraTime = MatchEngine.isExtraTimeRequired(activeMatch);
                 const controlsLocked = activeMatch.officialConfirmed || isUnresolved;
                 const activeDesc = MatchEngine.getKnockoutDescriptor(activeMatch);
                 const home = activeDesc.homeTeam;
@@ -2526,6 +3078,20 @@
                             <div class="p-4 rounded-2xl bg-amber-500/15 border border-amber-500/40 text-amber-900 flex items-center gap-3 text-sm font-bold">
                                 <i class="fa-solid fa-hourglass-half text-amber-600 text-lg"></i>
                                 <span>Pending Qualification – Waiting for qualified teams.</span>
+                            </div>
+                        ` : ""}
+
+                        ${needsExtraTime ? `
+                            <div class="p-4 rounded-2xl bg-orange-500/15 border border-orange-500/40 text-orange-950 flex items-center gap-3 text-sm font-bold">
+                                <i class="fa-solid fa-clock text-orange-600 text-lg"></i>
+                                <span>EXTRA TIME REQUIRED – Knockout match is currently tied (${activeMatch.homeScore} - ${activeMatch.awayScore}). Break the tie before confirming official result.</span>
+                            </div>
+                        ` : ""}
+
+                        ${activeDesc.adminReviewRequired ? `
+                            <div class="p-4 rounded-2xl bg-amber-500/20 border border-amber-500/50 text-amber-950 flex items-center gap-3 text-sm font-bold">
+                                <i class="fa-solid fa-triangle-exclamation text-amber-700 text-lg"></i>
+                                <span>ADMIN REVIEW REQUIRED – Existing team assignment preserved${activeDesc.reviewReason ? ` (${Views.escapeHtml(activeDesc.reviewReason)})` : ''}. Review via Set Teams.</span>
                             </div>
                         ` : ""}
 
@@ -3036,7 +3602,6 @@
                     return;
                 }
 
-                // Verify active Super Admin JWT session before invoking Edge Function
                 const { data: sessionData, error: sessionError } = await SupabaseConfig.client.auth.getSession();
                 const accessToken = sessionData?.session?.access_token;
                 if (sessionError || !accessToken) {
@@ -3295,18 +3860,19 @@
                 UI.showModal(
                     `Assign Teams: ${match.matchNo} (${desc.isPendingQualification ? desc.pendingBanner : match.stage})`,
                     `<div class="space-y-3 text-xs">
-                        <p class="text-slate-500">Kategori: <strong>${match.category}</strong></p>
+                        <p class="text-slate-500">Kategori: <strong>${match.category}</strong> • Existing non-null team assignments are protected from automatic overwrite; confirm or update teams explicitly here.</p>
+                        ${desc.adminReviewRequired ? `<div class="p-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-900 font-bold">ADMIN REVIEW REQUIRED${desc.reviewReason ? `: ${Views.escapeHtml(desc.reviewReason)}` : ''}</div>` : ''}
                         <div>
                             <label class="block font-semibold mb-1">Home Team</label>
                             <select id="bracket-home-select" class="w-full border rounded-xl px-3 py-2 text-sm">
-                                <option value="">-- ${desc.homeTeam.name} --</option>
+                                <option value="">-- Clear / ${desc.homeTeam.name} --</option>
                                 ${catTeams.map(t => `<option value="${t.id}" ${t.id === match.homeTeamId ? 'selected' : ''}>${t.name} (${t.pool})</option>`).join("")}
                             </select>
                         </div>
                         <div>
                             <label class="block font-semibold mb-1">Away Team</label>
                             <select id="bracket-away-select" class="w-full border rounded-xl px-3 py-2 text-sm">
-                                <option value="">-- ${desc.awayTeam.name} --</option>
+                                <option value="">-- Clear / ${desc.awayTeam.name} --</option>
                                 ${catTeams.map(t => `<option value="${t.id}" ${t.id === match.awayTeamId ? 'selected' : ''}>${t.name} (${t.pool})</option>`).join("")}
                             </select>
                         </div>
@@ -3314,7 +3880,7 @@
                     [
                         { label: "Cancel", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() },
                         {
-                            label: "Update Match Teams",
+                            label: "Confirm & Save Match Teams",
                             icon: "fa-check",
                             style: "primary",
                             onClick: async () => {
@@ -3339,6 +3905,7 @@
                 const away = desc.awayTeam;
                 const isLive = m.status === "LIVE";
                 const isFinal = m.status === "FINAL";
+                const needsExtraTime = MatchEngine.isExtraTimeRequired(m);
                 const headerStageText = desc.isPendingQualification ? desc.pendingBanner : m.stage;
 
                 return `
@@ -3352,15 +3919,19 @@
                                         LIVE • <span data-live-clock="${m.id}">${MatchEngine.formatClock(m.elapsedSeconds)}</span>
                                     </span>
                                 ` : isFinal ? `
-                                    <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 font-bold">FINAL</span>
+                                    <span class="px-2.5 py-0.5 rounded-full ${m.officialConfirmed ? 'bg-emerald-500/20 text-emerald-700' : 'bg-amber-500/20 text-amber-800'} font-bold">${m.officialConfirmed ? 'FINAL' : 'FINAL (DRAFT)'}</span>
                                 ` : `
                                     <span class="px-2.5 py-0.5 rounded-full bg-navy-800 text-slate-300 font-semibold">${m.kickoff}</span>
                                 `}
                             </div>
 
-                            <div class="flex items-center justify-between gap-2 text-[11px] text-slate-400 mb-3">
+                            <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 mb-3">
                                 <span>${m.category} • ${m.matchDurationMinutes || 12} mins</span>
-                                ${desc.isPendingQualification ? `<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 font-semibold">Pending Qualification</span>` : ""}
+                                <div class="flex flex-wrap gap-1">
+                                    ${needsExtraTime ? `<span class="px-2 py-0.5 rounded bg-orange-500/20 text-orange-800 font-bold">EXTRA TIME REQUIRED</span>` : ""}
+                                    ${desc.adminReviewRequired ? `<span class="px-2 py-0.5 rounded bg-amber-500/25 text-amber-900 border border-amber-500/40 font-bold">ADMIN REVIEW REQUIRED</span>` : ""}
+                                    ${desc.isPendingQualification ? `<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-700 font-semibold">Pending Qualification</span>` : ""}
+                                </div>
                             </div>
 
                             <!-- Teams & Score -->
@@ -3746,7 +4317,6 @@
                 }
                 const selectedCat = MatchEngine.selectedCategoryFilter;
 
-                // Filter matches by category when selected, while keeping all 19 matches visible under "ALL"
                 const filteredMatches = selectedCat === "ALL"
                     ? allMatches
                     : allMatches.filter(m => m.category === selectedCat);
@@ -3783,7 +4353,7 @@
                                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                                     <div>
                                         <h2 class="font-sport text-2xl font-bold text-white"><i class="fa-solid fa-trophy text-gold-400 mr-2"></i>Knockout Bracket Pathway (Matches 13–19)</h2>
-                                        <p class="text-xs text-slate-400">Nama pasukan dikemas kini secara automatik selepas keputusan Pool dan Semi Final disahkan FINAL.</p>
+                                        <p class="text-xs text-slate-400">Slot kosong diisi secara automatik selepas keputusan prasyarat OFFICIAL FINAL; pasukan sedia ada tidak ditindih.</p>
                                     </div>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -3791,8 +4361,9 @@
                                         const desc = MatchEngine.getKnockoutDescriptor(m);
                                         const h = desc.homeTeam;
                                         const a = desc.awayTeam;
-                                        const hWin = m.status === "FINAL" && m.homeScore > m.awayScore;
-                                        const aWin = m.status === "FINAL" && m.awayScore > m.homeScore;
+                                        const needsExtraTime = MatchEngine.isExtraTimeRequired(m);
+                                        const hWin = m.status === "FINAL" && m.officialConfirmed && m.homeScore > m.awayScore;
+                                        const aWin = m.status === "FINAL" && m.officialConfirmed && m.awayScore > m.homeScore;
                                         return `
                                             <div class="p-4 rounded-xl bg-navy-800/70 border border-pitch-500/30 flex flex-col justify-between gap-3">
                                                 <div>
@@ -3812,11 +4383,11 @@
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <div class="pt-2 border-t border-slate-200/70 flex items-center justify-between text-[11px]">
-                                                    <span class="${desc.isPendingQualification ? 'text-amber-700 font-semibold' : 'text-emerald-700 font-semibold'}">
-                                                        ${desc.isPendingQualification ? 'Pending Qualification' : 'Qualified Teams Confirmed'}
+                                                <div class="pt-2 border-t border-slate-200/70 flex items-center justify-between gap-2 text-[11px]">
+                                                    <span class="${needsExtraTime ? 'text-orange-800 font-bold' : desc.adminReviewRequired ? 'text-amber-900 font-bold' : desc.isPendingQualification ? 'text-amber-700 font-semibold' : 'text-emerald-700 font-semibold'}">
+                                                        ${needsExtraTime ? 'EXTRA TIME REQUIRED' : desc.adminReviewRequired ? 'ADMIN REVIEW REQUIRED' : desc.isPendingQualification ? 'Pending Qualification' : 'Qualified Teams Confirmed'}
                                                     </span>
-                                                    <button onclick="MatchEngine.selectedMatchId='${m.id}'; App.navigate('matchdetails')" class="text-pitch-400 font-bold hover:underline">
+                                                    <button onclick="MatchEngine.selectedMatchId='${m.id}'; App.navigate('matchdetails')" class="text-pitch-400 font-bold hover:underline shrink-0">
                                                         Match Center &rarr;
                                                     </button>
                                                 </div>
@@ -3895,6 +4466,7 @@
                 const desc = MatchEngine.getKnockoutDescriptor(match);
                 const home = desc.homeTeam;
                 const away = desc.awayTeam;
+                const needsExtraTime = MatchEngine.isExtraTimeRequired(match);
 
                 return `
                     <div class="space-y-6">
@@ -3913,6 +4485,20 @@
                                 </select>
                             </div>
                         </div>
+
+                        ${needsExtraTime ? `
+                            <div class="p-4 rounded-2xl bg-orange-500/15 border border-orange-500/40 text-orange-950 flex items-center gap-3 text-sm font-bold">
+                                <i class="fa-solid fa-clock text-orange-600 text-lg"></i>
+                                <span>EXTRA TIME REQUIRED – Tied knockout match (${match.homeScore} - ${match.awayScore}).</span>
+                            </div>
+                        ` : ""}
+
+                        ${desc.adminReviewRequired ? `
+                            <div class="p-4 rounded-2xl bg-amber-500/20 border border-amber-500/50 text-amber-950 flex items-center gap-3 text-sm font-bold">
+                                <i class="fa-solid fa-triangle-exclamation text-amber-700 text-lg"></i>
+                                <span>ADMIN REVIEW REQUIRED${desc.reviewReason ? ` – ${Views.escapeHtml(desc.reviewReason)}` : ' – Existing team assignment preserved.'}</span>
+                            </div>
+                        ` : ""}
 
                         <!-- Scoreboard Header -->
                         <div class="sport-card rounded-3xl overflow-hidden">
@@ -3963,7 +4549,7 @@
                     <div class="space-y-6">
                         <div>
                             <h1 class="font-sport text-3xl font-bold text-white">Official Match Results (${edYear})</h1>
-                            <p class="text-sm text-slate-400">Confirmed final scores and match summaries.</p>
+                            <p class="text-sm text-slate-400">Final scores and match summaries.</p>
                         </div>
                         ${finals.length === 0 ? `<div class="sport-card p-8 rounded-2xl text-center text-slate-400">No completed matches recorded yet for ${edYear}.</div>` : `
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -3985,10 +4571,17 @@
                 const editionCatNames = (edition.categories || []).map(c => c.name);
                 const categories = [...new Set([...editionCatNames, ...teamCategories])].sort((a, b) => a.localeCompare(b));
 
-                const renderPoolTable = (category, poolName, rows) => `
+                const renderPoolTable = (category, poolName, rows) => {
+                    const tie2 = MatchEngine.detectBoundaryTie(rows, 1);
+                    const tie3 = MatchEngine.detectBoundaryTie(rows, 2);
+                    const tie4 = MatchEngine.detectBoundaryTie(rows, 3);
+                    const activeTies = [tie2, tie3, tie4].filter(t => t.hasTie);
+
+                    return `
                     <div class="mb-6 last:mb-0">
-                        <div class="px-4 py-2 bg-navy-800/70 text-xs font-bold uppercase tracking-wider text-pitch-400 border-b border-white/10">
-                            ${poolName}
+                        <div class="px-4 py-2 bg-navy-800/70 text-xs font-bold uppercase tracking-wider text-pitch-400 border-b border-white/10 flex flex-wrap items-center justify-between gap-2">
+                            <span>${poolName}</span>
+                            ${activeTies.length > 0 ? `<span class="px-2 py-0.5 rounded bg-orange-500/20 text-orange-800 text-[10px]">TIE AT RANK ${activeTies.map(t => t.boundaryRank).join("/")} — OFFICIAL REVIEW REQUIRED</span>` : ""}
                         </div>
                         <div class="overflow-x-auto">
                             <table class="w-full rugby-table text-left text-sm">
@@ -4021,6 +4614,7 @@
                         </div>
                     </div>
                 `;
+                };
 
                 const renderCategorySection = (category) => {
                     const catTeams = TournamentStore.teams.filter(t => t.edition === edYear && t.category === category);
@@ -4031,7 +4625,7 @@
                             <div class="p-4 border-b border-white/10 flex flex-wrap items-center justify-between gap-2">
                                 <div>
                                     <h2 class="font-sport text-2xl font-bold text-white">${category}</h2>
-                                    <p class="text-xs text-slate-400">Kedudukan diasingkan khusus untuk kategori ${category} sahaja.</p>
+                                    <p class="text-xs text-slate-400">Kedudukan diasingkan khusus untuk kategori ${category} sahaja (berdasarkan keputusan OFFICIAL FINAL).</p>
                                 </div>
                                 <span class="px-2.5 py-1 rounded-full bg-pitch-600/15 text-pitch-400 text-xs font-bold">${catTeams.length} Teams</span>
                             </div>
