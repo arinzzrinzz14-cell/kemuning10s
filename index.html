@@ -952,71 +952,31 @@
                     return true;
                 }
 
-                // 1. Update `matches` status for non-official draft/live saves only.
-                const { error: matchUpdateError } = await db
-                    .from("matches")
-                    .update({ status: dbStatus })
-                    .eq("id", match.id);
-
-                if (matchUpdateError) {
-                    console.error("Ralat mengemas kini jadual matches:", matchUpdateError);
-                    UI.toast("Ralat Supabase (matches): " + matchUpdateError.message, "error");
+                // All draft/live score writes use the installed SECURITY DEFINER RPC.
+                // The browser must not write directly to matches or match_results.
+                if (dbStatus === "cancelled") {
+                    UI.toast("Pembatalan perlawanan belum disokong oleh RPC skor draf. Hubungi Admin.", "warning");
                     return false;
                 }
 
-                // 2. Check existing `match_results` record by `match_id` (No upsert onConflict assumed)
-                const { data: existingRows, error: selectErr } = await db
-                    .from("match_results")
-                    .select("match_id")
-                    .eq("match_id", match.id)
-                    .limit(1);
+                const { error: draftRpcError } = await db.rpc(
+                    "save_match_score_draft",
+                    {
+                        p_match_id: match.id,
+                        p_home_score: Number(match.homeScore) || 0,
+                        p_away_score: Number(match.awayScore) || 0,
+                        p_match_status: dbStatus
+                    }
+                );
 
-                if (selectErr) {
-                    console.error("Ralat menyemak match_results:", selectErr);
-                    UI.toast("Ralat Supabase (match_results select): " + selectErr.message, "error");
+                if (draftRpcError) {
+                    console.error("Draft Score RPC Error:", draftRpcError);
+                    UI.toast("Gagal menyimpan skor draf: " + draftRpcError.message, "error");
                     return false;
-                }
-
-                const payload = {
-                    home_score: Number(match.homeScore) || 0,
-                    away_score: Number(match.awayScore) || 0,
-                    status: resultStatus
-                };
-
-                if (match.officialConfirmed) {
-                    payload.confirmed_at = nowIso;
-                    payload.official_at = nowIso;
-                }
-
-                if (existingRows && existingRows.length > 0) {
-                    const { error: updErr } = await db
-                        .from("match_results")
-                        .update(payload)
-                        .eq("match_id", match.id);
-
-                    if (updErr) {
-                        console.error("Ralat mengemas kini match_results:", updErr);
-                        UI.toast("Ralat Supabase (match_results update): " + updErr.message, "error");
-                        return false;
-                    }
-                } else {
-                    const insertPayload = {
-                        match_id: match.id,
-                        ...payload
-                    };
-                    const { error: insErr } = await db
-                        .from("match_results")
-                        .insert(insertPayload);
-
-                    if (insErr) {
-                        console.error("Ralat memasukkan match_results:", insErr);
-                        UI.toast("Ralat Supabase (match_results insert): " + insErr.message, "error");
-                        return false;
-                    }
                 }
 
                 if (!options.silent) {
-                    AuthManager.logAudit(`Synced Match ${match.matchNo} (${match.homeScore}-${match.awayScore}, ${dbStatus}) to Supabase`);
+                    AuthManager.logAudit(`Draft Score Saved via RPC: Match ${match.matchNo} (${match.homeScore}-${match.awayScore}, ${dbStatus})`);
                 }
                 return true;
             },
@@ -1534,7 +1494,7 @@
                     row.pd = row.pf - row.pa;
                     row.bp = 0;
                     return row;
-                }).sort((a, b) => b.pts - a.pts || b.pd - a.pd || b.pf - a.pf || a.team.name.localeCompare(b.team.name));
+                }).sort((a, b) => b.pts - a.pts || b.pd - a.pd || b.pf - a.pf);
             },
 
             // Detect unresolved ties across PTS, PD, and PF at a boundary rank (e.g., 2nd/3rd or 4th/5th)
@@ -1763,11 +1723,39 @@
                 if (editionMatches.length === 0) return 0;
 
                 const persistRequested = Boolean(options.persistToDb);
-                const canWriteToSupabase = Boolean(
-                    persistRequested &&
-                    SupabaseConfig.client &&
-                    AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])
-                );
+                // All qualification writes go through the SECURITY DEFINER RPC above.
+                // This remaining path is local-only (page load / display refresh).
+
+                if (persistRequested) {
+                    if (!SupabaseConfig.client) {
+                        UI.toast("Sambungan Supabase belum tersedia.", "error");
+                        return 0;
+                    }
+                    const tournamentId = TournamentStore.editions?.[edYear]?.id || TournamentStore.tournamentId;
+                    if (!tournamentId) {
+                        UI.toast("ID kejohanan tidak ditemui. Auto-Advance dibatalkan.", "error");
+                        return 0;
+                    }
+                    const isAdmin = AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"]);
+                    const { data: rpcData, error: rpcError } = await SupabaseConfig.client.rpc(
+                        "admin_sync_knockout_qualification",
+                        {
+                            p_tournament_id: tournamentId,
+                            p_release_admin_reset_hold: Boolean(options.releaseAdminResetHold === true && isAdmin)
+                        }
+                    );
+                    if (rpcError) {
+                        console.error("Auto-Advance RPC Error:", rpcError);
+                        UI.toast("Auto-Advance gagal: " + rpcError.message, "error");
+                        return 0;
+                    }
+                    await SupabaseData.loadTournamentByYear(edYear);
+                    const updated = Number(rpcData?.updated_matches || 0);
+                    if (!options.silent) {
+                        UI.toast(rpcData?.message || `Semakan RPC selesai. ${updated} perlawanan dikemas kini.`, "info");
+                    }
+                    return updated;
+                }
 
                 const byNum = (num) => editionMatches.find(m => Number(m.matchNumberRaw) === Number(num)) || null;
                 const winnerOf = (m) => {
@@ -2025,50 +2013,25 @@
                         updatedCount++;
                     }
 
-                    if (canWriteToSupabase) {
-                        const updatePayload = {
-                            manual_override: Boolean(match.manualOverride),
-                            admin_review_required: Boolean(match.adminReviewRequired),
-                            admin_review_reason: match.adminReviewReason || ""
-                        };
 
-                        if (slotsChanged) {
-                            updatePayload.home_team_id = resolvedHome;
-                            updatePayload.away_team_id = resolvedAway;
-                        }
-
-                        const { error } = await SupabaseConfig.client
-                            .from("matches")
-                            .update(updatePayload)
-                            .eq("id", match.id);
-
-                        if (error) {
-                            console.error(
-                                `Ralat menyimpan status kelayakan Match ${match.matchNo}:`,
-                                error
-                            );
-                        }
-                    }
                 }
 
-                if (updatedCount > 0 && canWriteToSupabase && !options.silent) {
-                    AuthManager.logAudit(`Filled ${updatedCount} empty knockout slot(s) from officially confirmed results (existing team IDs preserved)`);
-                }
                 return updatedCount;
             },
 
-            // Advance qualified teams into currently NULL knockout slots while preserving existing assignments
-            // Explicitly restricted to SUPER_ADMIN or ADMIN role and persists only when explicitly invoked
+            // Explicit Auto-Advance: Admin/Super Admin may release Admin Reset Hold;
+            // an assigned Scorekeeper may sync only after an official result is published.
             async advanceQualifiedTeams(categoryName) {
-                if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) {
-                    UI.toast("Hanya Admin atau Super Admin boleh mengemas kini laluan bracket.", "error");
+                const isAdmin = AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"]);
+                if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN", "SCOREKEEPER"])) {
+                    UI.toast("Akses Auto-Advance tidak dibenarkan untuk akaun ini.", "error");
                     return;
                 }
                 const edYear = TournamentStore.activeEditionYear;
                 const updatedCount = await this.syncKnockoutQualificationFromStandings(edYear, {
                     persistToDb: true,
                     silent: false,
-                    releaseAdminResetHold: true
+                    releaseAdminResetHold: isAdmin
                 });
                 const reviewMatches = this.matches.filter(m => String(m.edition) === String(edYear) && m.adminReviewRequired);
 
