@@ -106,6 +106,137 @@
         .rugby-table tbody tr:hover { background-color: #F4FAFE; }
         @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
         .live-dot { animation: pulseDot 1.4s infinite; }
+
+        /* ==========================================================
+           READABILITY & TOUCH-FRIENDLY UI POLISH (2026)
+           Visual-only rules: no tournament logic or data changes.
+           ========================================================== */
+        #app-viewport {
+            font-size: 15px;
+            line-height: 1.55;
+        }
+        #app-viewport p,
+        #app-viewport label,
+        #app-viewport li,
+        #app-viewport td,
+        #app-viewport th {
+            line-height: 1.5;
+        }
+        #app-viewport .text-\[9px\],
+        #app-viewport .text-\[10px\],
+        #app-viewport .text-\[11px\] {
+            font-size: 12px !important;
+            line-height: 1.4 !important;
+        }
+        #app-viewport .text-xs {
+            font-size: 13px !important;
+            line-height: 1.45 !important;
+        }
+        #app-viewport .text-sm {
+            font-size: 14px !important;
+            line-height: 1.5 !important;
+        }
+        #app-viewport button,
+        #app-viewport a[role="button"],
+        #app-viewport input,
+        #app-viewport select {
+            min-height: 44px;
+        }
+        #app-viewport button {
+            font-weight: 700;
+            line-height: 1.25;
+            white-space: normal;
+            transition: filter .15s ease, transform .15s ease, box-shadow .15s ease;
+        }
+        #app-viewport button:active {
+            transform: translateY(1px);
+        }
+        #app-viewport button:disabled {
+            opacity: .55;
+            cursor: not-allowed;
+            filter: grayscale(.25);
+        }
+        #app-viewport button:focus-visible,
+        #app-viewport a:focus-visible,
+        #app-viewport input:focus-visible,
+        #app-viewport select:focus-visible,
+        #app-viewport textarea:focus-visible {
+            outline: 3px solid #F58220 !important;
+            outline-offset: 2px;
+        }
+        #app-viewport .sport-card,
+        #app-viewport .glass-panel {
+            box-shadow: 0 5px 18px rgba(16,44,80,.07);
+        }
+        #app-viewport h1 {
+            line-height: 1.18;
+            letter-spacing: .01em;
+        }
+        #app-viewport h2,
+        #app-viewport h3 {
+            line-height: 1.25;
+        }
+        #app-viewport .rugby-table {
+            font-size: 13px;
+        }
+        #app-viewport .rugby-table th {
+            font-weight: 800;
+            letter-spacing: .025em;
+            padding: 12px 10px;
+        }
+        #app-viewport .rugby-table td {
+            padding: 11px 10px;
+            color: #173B60;
+        }
+        #app-viewport input,
+        #app-viewport select,
+        #app-viewport textarea {
+            min-height: 46px;
+            border-width: 1.5px !important;
+            border-radius: 10px;
+            font-size: 15px !important;
+        }
+        #custom-modal #modal-body {
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        #custom-modal #modal-footer button {
+            min-height: 46px;
+            font-size: 14px;
+        }
+        #toast-container > div {
+            font-size: 14px !important;
+            line-height: 1.45 !important;
+            padding: 14px !important;
+        }
+        @media (max-width: 767px) {
+            #app-viewport {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 18px;
+            }
+            #app-viewport .sport-card,
+            #app-viewport .glass-panel {
+                border-radius: 14px;
+            }
+            #app-viewport button {
+                min-height: 46px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+            }
+            #app-viewport .grid {
+                min-width: 0;
+            }
+            #app-viewport .overflow-x-auto {
+                -webkit-overflow-scrolling: touch;
+            }
+        }
+        @media (min-width: 768px) and (max-width: 1279px) {
+            #app-viewport {
+                padding-left: 20px;
+                padding-right: 20px;
+            }
+        }
     </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-pitch-600 selection:text-white">
@@ -821,12 +952,21 @@
                     : [
                         { label: "Cancel", icon: "fa-xmark", style: "secondary", onClick: () => UI.closeModal() },
                         {
-                            label: "Reset Match to Upcoming",
+                            label: "Reset Score Only",
                             icon: "fa-rotate-left",
                             style: "orange",
                             onClick: async () => {
                                 UI.closeModal();
                                 await MatchEngine.executeResetMatch(match.id);
+                            }
+                        },
+                        {
+                            label: "Reset Match & Teams",
+                            icon: "fa-users-slash",
+                            style: "orange",
+                            onClick: async () => {
+                                UI.closeModal();
+                                await MatchEngine.executeResetMatch(match.id, { clearTeams: true });
                             }
                         }
                     ];
@@ -839,13 +979,13 @@
                             <div class="font-bold text-sm text-[#102C50]">${desc.homeTeam.name} <span class="text-slate-400 mx-1">(${match.homeScore} - ${match.awayScore})</span> ${desc.awayTeam.name}</div>
                             <div class="text-[11px] text-slate-500 mt-1">${match.category} • ${match.stage} • ${match.pitch}</div>
                         </div>
-                        <p class="text-slate-600">The fixture, tournament, teams, category, and scorekeeper assignment will remain intact. Standings and knockout slots will refresh automatically.</p>
+                        <p class="text-slate-600">Pilih Reset Score Only untuk kekalkan pasukan, atau Reset Match &amp; Teams untuk kosongkan kedua-dua pasukan bagi perlawanan ini sahaja. Fixture, kategori dan scorekeeper assignment dikekalkan. Reset pasukan akan menahan auto-qualification sehingga Admin menjalankan Auto-Advance atau Set Teams.</p>
                     </div>`,
                     modalButtons
                 );
             },
 
-            async executeResetMatch(matchId) {
+            async executeResetMatch(matchId, options = {}) {
                 if (!AuthManager.hasRole(["SUPER_ADMIN", "ADMIN"])) return;
                 if (!SupabaseConfig.client) return;
                 const match = this.getMatch(matchId);
@@ -860,10 +1000,20 @@
 
                 const db = SupabaseConfig.client;
 
-                // 1. Reset match status to 'scheduled' in `matches` without altering teams, category, or scorekeeper_id
+                // 1. Reset match status; optionally clear only this match's team slots.
+                const resetPayload = { status: "scheduled" };
+                if (options.clearTeams === true) {
+                    resetPayload.home_team_id = null;
+                    resetPayload.away_team_id = null;
+                    resetPayload.manual_override = false;
+                    // Hold auto-qualification after an explicit Admin team reset.
+                    resetPayload.admin_review_required = true;
+                    resetPayload.admin_review_reason = "ADMIN RESET HOLD: teams cleared by Admin; awaiting explicit Auto-Advance or Set Teams.";
+                }
+
                 const { error: matchErr } = await db
                     .from("matches")
-                    .update({ status: "scheduled" })
+                    .update(resetPayload)
                     .eq("id", match.id);
 
                 if (matchErr) {
@@ -915,14 +1065,31 @@
                 match.awayScore = 0;
                 match.officialConfirmed = false;
                 match.extraTimeRequired = false;
-                match.adminReviewRequired = false;
-                match.adminReviewReason = "";
+                if (options.clearTeams === true) {
+                    match.homeTeamId = null;
+                    match.awayTeamId = null;
+                    match.manualOverride = false;
+                    match.adminReviewRequired = true;
+                    match.adminReviewReason = "ADMIN RESET HOLD: teams cleared by Admin; awaiting explicit Auto-Advance or Set Teams.";
+                } else {
+                    match.adminReviewRequired = false;
+                    match.adminReviewReason = "";
+                }
                 match.events = [];
 
                 // 4. Reload tournament data (read-only qualification sync during reload; never auto-persists)
                 await SupabaseData.loadTournamentByYear(match.edition);
-                AuthManager.logAudit(`Reset Match ${match.matchNo} (${match.id}) back to SCHEDULED / Upcoming`);
-                UI.toast(`Match ${match.matchNo} has been reset to Upcoming (0 - 0).`, "success");
+                AuthManager.logAudit(
+                    options.clearTeams === true
+                        ? `Reset Match ${match.matchNo} (${match.id}) including team assignments`
+                        : `Reset Match ${match.matchNo} (${match.id}) back to SCHEDULED / Upcoming`
+                );
+                UI.toast(
+                    options.clearTeams === true
+                        ? `Match ${match.matchNo} reset: scores and team slots cleared. Auto-qualification is on hold until an explicit Admin action.`
+                        : `Match ${match.matchNo} has been reset to Upcoming (0 - 0).`,
+                    "success"
+                );
                 App.renderCurrentPage();
             },
 
@@ -1633,6 +1800,18 @@
                     const tieNotes = tieNotesByMatch[match.id] || [];
                     const prerequisiteCheck =
                         this.areKnockoutPrerequisitesOfficial(edYear, match);
+                    const isAdminResetHold =
+                        match.adminReviewRequired === true &&
+                        String(match.adminReviewReason || "").startsWith("ADMIN RESET HOLD:");
+
+                    // A deliberate Admin team reset remains empty across page reloads.
+                    // Only the explicit Auto-Advance action may release this hold.
+                    if (isAdminResetHold && options.releaseAdminResetHold !== true) {
+                        match.adminReviewRequired = true;
+                    } else if (isAdminResetHold && options.releaseAdminResetHold === true) {
+                        match.adminReviewRequired = false;
+                        match.adminReviewReason = "";
+                    }
 
                     // Never clear or overwrite existing non-null team IDs.
                     // Persist review status only during an explicit sync/result-confirmation action.
@@ -1644,7 +1823,9 @@
                     const homeTieOnExisting = homeHasExisting && computedHome === null && tieNotes.length > 0;
                     const awayTieOnExisting = awayHasExisting && computedAway === null && tieNotes.length > 0;
 
-                    if (match.manualOverride === true) {
+                    if (isAdminResetHold && options.releaseAdminResetHold !== true) {
+                        // Keep the reset hold intact; do not silently re-qualify this match.
+                    } else if (match.manualOverride === true) {
                         match.adminReviewRequired = false;
                         match.adminReviewReason = "";
                     } else if (
@@ -1692,7 +1873,9 @@
                         match.adminReviewReason = "";
                     }
 
-                    const canFillSlots = match.status === "SCHEDULED";
+                    const canFillSlots =
+                        match.status === "SCHEDULED" &&
+                        !(isAdminResetHold && options.releaseAdminResetHold !== true);
 
                     const resolvedHome = canFillSlots
                         ? (homeHasExisting ? currentHome : computedHome)
@@ -1752,7 +1935,11 @@
                     return;
                 }
                 const edYear = TournamentStore.activeEditionYear;
-                const updatedCount = await this.syncKnockoutQualificationFromStandings(edYear, { persistToDb: true, silent: false });
+                const updatedCount = await this.syncKnockoutQualificationFromStandings(edYear, {
+                    persistToDb: true,
+                    silent: false,
+                    releaseAdminResetHold: true
+                });
                 const reviewMatches = this.matches.filter(m => String(m.edition) === String(edYear) && m.adminReviewRequired);
 
                 if (updatedCount > 0 && reviewMatches.length > 0) {
