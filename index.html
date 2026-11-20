@@ -752,12 +752,6 @@
         const STORAGE_KEY = 'kemuning10s_state_v2';
         const SESSION_KEY = 'kemuning10s_session_v2';
         const SUPABASE_CFG_KEY = 'kemuning10s_supabase_cfg';
-        // Public client configuration is embedded so password-recovery links also work
-        // in a fresh browser that has never saved the app's local Supabase settings.
-        const DEFAULT_SUPABASE_CONFIG = {
-            url: 'https://jcztjdxdnzqdcmgnisvx.supabase.co',
-            anonKey: 'sb_publishable_zb5-7SoqQxqRCJuQyJdjRw_ZoEf4U3J'
-        };
         const syncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('kemuning10s_realtime') : null;
 
         // Default Initial State (Strictly respects Section 17: exact 10 teams, no invented dates/venues/players/matches/results)
@@ -914,28 +908,18 @@
         // Full Two-Way Supabase Realtime Sync Initialization
         async function initSupabaseFromConfig() {
             try {
-                // Prefer the saved project config when valid; otherwise use the
-                // built-in public config so recovery links work on a clean device.
-                let cfg = { ...DEFAULT_SUPABASE_CONFIG };
                 const cfgRaw = localStorage.getItem(SUPABASE_CFG_KEY);
-                if (cfgRaw) {
-                    try {
-                        const savedCfg = JSON.parse(cfgRaw);
-                        if (savedCfg && savedCfg.url && savedCfg.anonKey) cfg = savedCfg;
-                    } catch (configError) {
-                        console.warn('Saved Supabase config is invalid; using built-in config.', configError);
-                    }
+                if (!cfgRaw) {
+                    updateSyncStatusBadge('local', 'Local Mode');
+                    return;
                 }
-                if (!window.supabase || typeof window.supabase.createClient !== 'function') {
-                    updateSyncStatusBadge('error', 'Supabase Library Unavailable');
+                const cfg = JSON.parse(cfgRaw);
+                if (!cfg.url || !cfg.anonKey || !window.supabase) {
+                    updateSyncStatusBadge('local', 'Local Mode');
                     return;
                 }
 
-                // Persist the known public config for the normal app flow too.
-                if (!cfgRaw) localStorage.setItem(SUPABASE_CFG_KEY, JSON.stringify(cfg));
-                supabaseClient = window.supabase.createClient(cfg.url, cfg.anonKey, {
-                    auth: { detectSessionInUrl: true, persistSession: true, autoRefreshToken: true }
-                });
+                supabaseClient = window.supabase.createClient(cfg.url, cfg.anonKey);
 
                 // Supabase emits PASSWORD_RECOVERY after a valid recovery link is opened.
                 supabaseClient.auth.onAuthStateChange((event) => {
@@ -944,11 +928,9 @@
                     }
                 });
 
-                // Supabase's implicit recovery callback places type=recovery in the URL hash.
-                // Check both hash and query in case the project's email template uses either form.
+                // Fallback for Supabase recovery links using the hash-token flow.
                 const recoveryHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-                const recoveryQuery = new URLSearchParams(window.location.search);
-                if (recoveryHash.get('type') === 'recovery' || recoveryQuery.get('type') === 'recovery') {
+                if (recoveryHash.get('type') === 'recovery') {
                     showPasswordRecoveryModal();
                 }
 
