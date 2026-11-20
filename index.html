@@ -268,6 +268,48 @@
         #app-viewport .pitch-gradient .bg-navy-950\/70 .text-sky-400 {
             color: #FFFFFF !important;
         }
+        /* Dashboard Registered Teams: high contrast, visual-only. */
+        #app-viewport .dashboard-team-table {
+            background: #FFFFFF !important;
+            color: #102C50 !important;
+            border: 1px solid #B7C9D8 !important;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        #app-viewport .dashboard-team-table thead {
+            background: #12395B !important;
+        }
+        #app-viewport .dashboard-team-table thead th {
+            color: #FFFFFF !important;
+            font-weight: 800 !important;
+            border-bottom: 2px solid #D6A93A !important;
+        }
+        #app-viewport .dashboard-team-table tbody tr {
+            background: #FFFFFF !important;
+            border-bottom: 1px solid #D7E1EA !important;
+        }
+        #app-viewport .dashboard-team-table tbody tr:nth-child(even) {
+            background: #EFF6FB !important;
+        }
+        #app-viewport .dashboard-team-table tbody td,
+        #app-viewport .dashboard-team-table tbody td.text-white,
+        #app-viewport .dashboard-team-table tbody td.text-slate-300,
+        #app-viewport .dashboard-team-table tbody td .text-slate-400 {
+            color: #173B5C !important;
+        }
+        #app-viewport .dashboard-team-table tbody td:first-child {
+            color: #102C50 !important;
+            font-weight: 800 !important;
+        }
+        #app-viewport .dashboard-team-table tbody td span {
+            color: #52677D !important;
+        }
+        #app-viewport .dashboard-team-table tbody td .bg-pitch-800\\/50 {
+            background: #DCEEF8 !important;
+            color: #12395B !important;
+            border: 1px solid #A9D5EA !important;
+        }
+
         /* Scoring action buttons: strong blue surface + readable white labels. */
         #app-viewport button.bg-navy-800,
         #app-viewport button.bg-navy-700 {
@@ -1304,7 +1346,15 @@
                 }
                 match.events = [];
 
-                // 4. Reload tournament data (read-only qualification sync during reload; never auto-persists)
+                // 4. Persist the reset clock state to Supabase as well as local memory.
+                // The matches row is already back to scheduled, so FIRST_HALF/0/stopped is valid.
+                const clockResetSaved = await this.persistClockState(match, false);
+                if (!clockResetSaved) {
+                    UI.toast(`Match ${match.matchNo} scores/status were reset, but the timer reset could not be saved. Please retry Reset.`, "error");
+                    return;
+                }
+
+                // 5. Reload tournament data (read-only qualification sync during reload; never auto-persists)
                 await SupabaseData.loadTournamentByYear(match.edition);
                 AuthManager.logAudit(
                     options.clearTeams === true
@@ -3202,7 +3252,7 @@
                                 <div class="lg:col-span-2 sport-card p-6 rounded-2xl">
                                     <h3 class="font-bold text-white mb-4">Registered Teams (${edYear})</h3>
                                     <div class="overflow-x-auto">
-                                        <table class="w-full rugby-table text-left text-sm">
+                                        <table class="w-full rugby-table dashboard-team-table text-left text-sm">
                                             <thead>
                                                 <tr>
                                                     <th class="p-3">Club / Team</th>
