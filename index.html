@@ -268,61 +268,6 @@
         #app-viewport .pitch-gradient .bg-navy-950\/70 .text-sky-400 {
             color: #FFFFFF !important;
         }
-        /* Dashboard Registered Teams: high contrast, visual-only. */
-        #app-viewport .dashboard-team-table {
-            background: #FFFFFF !important;
-            color: #102C50 !important;
-            border: 1px solid #B7C9D8 !important;
-            border-radius: 12px;
-            overflow: hidden;
-        }
-        #app-viewport .dashboard-team-table thead {
-            background: #12395B !important;
-        }
-        #app-viewport .dashboard-team-table thead th {
-            color: #FFFFFF !important;
-            font-weight: 800 !important;
-            border-bottom: 2px solid #D6A93A !important;
-        }
-        #app-viewport .dashboard-team-table tbody tr {
-            background: #FFFFFF !important;
-            border-bottom: 1px solid #D7E1EA !important;
-        }
-        #app-viewport .dashboard-team-table tbody tr:nth-child(even) {
-            background: #EFF6FB !important;
-        }
-        #app-viewport .dashboard-team-table tbody td,
-        #app-viewport .dashboard-team-table tbody td.text-white,
-        #app-viewport .dashboard-team-table tbody td.text-slate-300,
-        #app-viewport .dashboard-team-table tbody td .text-slate-400 {
-            color: #173B5C !important;
-        }
-        #app-viewport .dashboard-team-table tbody td:first-child {
-            color: #102C50 !important;
-            font-weight: 800 !important;
-        }
-        /* Explicitly force team-name text and its short code to dark navy. */
-        #app-viewport table.dashboard-team-table tbody tr td:first-child,
-        #app-viewport table.dashboard-team-table tbody tr td:first-child *,
-        #app-viewport table.dashboard-team-table tbody tr td:first-child span {
-            color: #102C50 !important;
-            -webkit-text-fill-color: #102C50 !important;
-            opacity: 1 !important;
-            visibility: visible !important;
-        }
-        #app-viewport table.dashboard-team-table tbody tr td:first-child {
-            background-color: #FFFFFF !important;
-            font-weight: 800 !important;
-        }
-        #app-viewport .dashboard-team-table tbody td span {
-            color: #52677D !important;
-        }
-        #app-viewport .dashboard-team-table tbody td .bg-pitch-800\\/50 {
-            background: #DCEEF8 !important;
-            color: #12395B !important;
-            border: 1px solid #A9D5EA !important;
-        }
-
         /* Scoring action buttons: strong blue surface + readable white labels. */
         #app-viewport button.bg-navy-800,
         #app-viewport button.bg-navy-700 {
@@ -393,24 +338,36 @@
             }
         }
 
-        /* FINAL FIX: Dashboard > Teams name cell uses a dark surface with white text. */
-        #app-viewport table.dashboard-team-table tbody tr > td:first-child {
-            background-color: #12395B !important;
-            color: #FFFFFF !important;
-            -webkit-text-fill-color: #FFFFFF !important;
-            font-weight: 900 !important;
-            opacity: 1 !important;
-            visibility: visible !important;
+        /* Dashboard Teams cards: restore readable contrast without changing layout or behavior. */
+        #app-viewport .team-card-item button[data-team-profile] {
+            color: #102C50 !important;
+            font-size: 1.05rem !important;
+            font-weight: 800 !important;
+            line-height: 1.35 !important;
+            text-align: left;
         }
-        #app-viewport table.dashboard-team-table tbody tr > td:first-child,
-        #app-viewport table.dashboard-team-table tbody tr > td:first-child * {
-            color: #FFFFFF !important;
-            -webkit-text-fill-color: #FFFFFF !important;
-            opacity: 1 !important;
-            visibility: visible !important;
+        #app-viewport .team-card-item button[data-team-profile]:hover,
+        #app-viewport .team-card-item button[data-team-profile]:focus {
+            color: #0876A8 !important;
+            text-decoration: underline;
+            text-underline-offset: 3px;
         }
-        #app-viewport table.dashboard-team-table tbody tr > td:first-child {
-            border-bottom: 1px solid #6EA5C7 !important;
+        #app-viewport .team-card-item .text-xs.text-slate-400 {
+            color: #52677D !important;
+            font-weight: 700 !important;
+        }
+        #app-viewport .team-card-item .text-xs.text-slate-400 .text-pitch-400 {
+            color: #0876A8 !important;
+            font-weight: 800 !important;
+        }
+        #app-viewport .team-card-item > .flex + .text-xs {
+            background-color: #E5F4FB !important;
+            color: #24435F !important;
+            border: 1px solid #A9D5EA !important;
+        }
+        #app-viewport .team-card-item > .flex + .text-xs span {
+            color: #52677D !important;
+            font-weight: 700 !important;
         }
 </style>
 </head>
@@ -1379,15 +1336,7 @@
                 }
                 match.events = [];
 
-                // 4. Persist the reset clock state to Supabase as well as local memory.
-                // The matches row is already back to scheduled, so FIRST_HALF/0/stopped is valid.
-                const clockResetSaved = await this.persistClockState(match, false);
-                if (!clockResetSaved) {
-                    UI.toast(`Match ${match.matchNo} scores/status were reset, but the timer reset could not be saved. Please retry Reset.`, "error");
-                    return;
-                }
-
-                // 5. Reload tournament data (read-only qualification sync during reload; never auto-persists)
+                // 4. Reload tournament data (read-only qualification sync during reload; never auto-persists)
                 await SupabaseData.loadTournamentByYear(match.edition);
                 AuthManager.logAudit(
                     options.clearTeams === true
@@ -3285,7 +3234,7 @@
                                 <div class="lg:col-span-2 sport-card p-6 rounded-2xl">
                                     <h3 class="font-bold text-white mb-4">Registered Teams (${edYear})</h3>
                                     <div class="overflow-x-auto">
-                                        <table class="w-full rugby-table dashboard-team-table text-left text-sm">
+                                        <table class="w-full rugby-table text-left text-sm">
                                             <thead>
                                                 <tr>
                                                     <th class="p-3">Club / Team</th>
@@ -3297,7 +3246,7 @@
                                             <tbody>
                                                 ${teams.length === 0 ? `<tr><td colspan="4" class="p-4 text-center text-slate-400">No teams registered yet.</td></tr>` : teams.map(t => `
                                                     <tr>
-                                                        <td class="p-3 font-semibold" style="background:#FFFFFF !important;color:#102C50 !important;-webkit-text-fill-color:#102C50 !important;font-weight:900 !important;opacity:1 !important;visibility:visible !important;"><span style="color:#102C50 !important;-webkit-text-fill-color:#102C50 !important;font-weight:900 !important;">${t.name}</span> <span style="color:#36536E !important;-webkit-text-fill-color:#36536E !important;font-size:12px !important;">(${t.short})</span></td>
+                                                        <td class="p-3 font-semibold text-white">${t.name} <span class="text-xs text-slate-400">(${t.short})</span></td>
                                                         <td class="p-3 text-xs text-slate-300">${t.category}</td>
                                                         <td class="p-3"><span class="px-2 py-0.5 rounded bg-pitch-800/50 text-pitch-300 text-xs font-bold">${t.pool}</span></td>
                                                         <td class="p-3 text-slate-300 text-xs">${t.coach}</td>
