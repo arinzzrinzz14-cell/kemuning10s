@@ -337,38 +337,6 @@
                 font-size: 13px;
             }
         }
-
-        /* Dashboard Teams cards: restore readable contrast without changing layout or behavior. */
-        #app-viewport .team-card-item button[data-team-profile] {
-            color: #102C50 !important;
-            font-size: 1.05rem !important;
-            font-weight: 800 !important;
-            line-height: 1.35 !important;
-            text-align: left;
-        }
-        #app-viewport .team-card-item button[data-team-profile]:hover,
-        #app-viewport .team-card-item button[data-team-profile]:focus {
-            color: #0876A8 !important;
-            text-decoration: underline;
-            text-underline-offset: 3px;
-        }
-        #app-viewport .team-card-item .text-xs.text-slate-400 {
-            color: #52677D !important;
-            font-weight: 700 !important;
-        }
-        #app-viewport .team-card-item .text-xs.text-slate-400 .text-pitch-400 {
-            color: #0876A8 !important;
-            font-weight: 800 !important;
-        }
-        #app-viewport .team-card-item > .flex + .text-xs {
-            background-color: #E5F4FB !important;
-            color: #24435F !important;
-            border: 1px solid #A9D5EA !important;
-        }
-        #app-viewport .team-card-item > .flex + .text-xs span {
-            color: #52677D !important;
-            font-weight: 700 !important;
-        }
 </style>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-pitch-600 selection:text-white">
@@ -782,6 +750,10 @@
                 if (!row?.match_id) return;
                 const match = this.matches.find(m => m.id === row.match_id);
                 if (!match) return;
+                // Ignore delayed Realtime/poll responses older than the latest saved clock state.
+                const incomingUpdatedAt = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+                const currentUpdatedAt = match.clockUpdatedAt ? new Date(match.clockUpdatedAt).getTime() : 0;
+                if (incomingUpdatedAt && currentUpdatedAt && incomingUpdatedAt < currentUpdatedAt) return;
                 match.elapsedSeconds = this.clockElapsedFromRow(row);
                 match.period = row.period || match.period || "FIRST_HALF";
                 match.timerRunning = Boolean(row.timer_running) && !["HALF_TIME", "FULL_TIME"].includes(match.period);
@@ -1061,10 +1033,7 @@
             },
 
             mapUiStatusToDbStatus(status, period) {
-                // Draft-score RPC accepts only scheduled/live/half_time.
-                // A finished-but-not-yet-official result remains a draft, so keep
-                // the database match status at live until the official RPC publishes it.
-                if (status === "FINAL" || period === "FULL_TIME") return "live";
+                if (status === "FINAL" || period === "FULL_TIME") return "full_time";
                 if (period === "HALF_TIME" || status === "HALF_TIME") return "half_time";
                 if (status === "LIVE") return "live";
                 if (status === "CANCELLED") return "cancelled";
@@ -1336,7 +1305,15 @@
                 }
                 match.events = [];
 
-                // 4. Reload tournament data (read-only qualification sync during reload; never auto-persists)
+                // 4. Persist the reset clock state for this match. The matches row is already
+                //    back to scheduled, so the secure RPC can safely upsert 00:00 / FIRST_HALF / stopped.
+                const clockResetSaved = await this.persistClockState(match, true);
+                if (!clockResetSaved) {
+                    UI.toast("Skor telah direset, tetapi timer gagal disimpan. Sila cuba Reset sekali lagi.", "error");
+                    return;
+                }
+
+                // 5. Reload tournament data (read-only qualification sync during reload; never auto-persists)
                 await SupabaseData.loadTournamentByYear(match.edition);
                 AuthManager.logAudit(
                     options.clearTeams === true
@@ -1389,10 +1366,27 @@
                     match.timerRunning = true;
                     UI.toast(`Second Half started for Match ${match.matchNo}.`, "success");
                 } else if (action === "RESET") {
+                    // Reset the clock independently from score persistence. This prevents a
+                    // score-save failure or a delayed old poll response from restoring old time.
                     match.elapsedSeconds = 0;
                     match.timerRunning = false;
                     match.period = "FIRST_HALF";
-                    UI.toast(`Clock reset to 00:00.`, "info");
+                    match.clockResetPending = true;
+                    App.renderCurrentPage();
+                    const clockSaved = await this.persistClockState(match, false);
+                    match.clockResetPending = false;
+                    if (!clockSaved) {
+                        UI.toast("Reset timer gagal disimpan. Masa lama mungkin muncul semula; sila cuba sekali lagi.", "error");
+                        return;
+                    }
+                    // Reassert the confirmed reset locally; applyClockRow rejects older responses.
+                    match.elapsedSeconds = 0;
+                    match.timerRunning = false;
+                    match.period = "FIRST_HALF";
+                    this.updateLiveClockDisplays();
+                    App.renderCurrentPage();
+                    UI.toast("Timer berjaya direset dan disimpan pada 00:00.", "success");
+                    return;
                 }
 
                 App.renderCurrentPage();
