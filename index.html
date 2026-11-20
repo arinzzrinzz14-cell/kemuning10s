@@ -619,7 +619,7 @@
                     venue: "Padang Ragbi ADTEC Shah Alam, Selangor",
                     organizer: "Kemuning Rugby Club & Selangor Rugby Union",
                     description: "Official 10-a-side rugby tournament management platform.",
-                    rulesSummary: "World Rugby 10-a-side Variations • Win: 4 pts, Draw: 2 pts, Loss: 0 pts, Bonus Point for 4+ tries or loss within 7 pts.",
+                    rulesSummary: "KEMUNING 10s Points System • Win: 3 pts, Draw: 1 pt, Loss: 0 pts. No bonus points.",
                     categories: []
                 }
             },
@@ -642,7 +642,7 @@
                     date: "Competition Rules",
                     category: "REGULATIONS",
                     title: "World Rugby 10s Match Laws & Points Allocation",
-                    summary: "Pool matches award 4 points for a win, 2 points for a draw, and bonus points for scoring 4+ tries or losing by 7 points or fewer.",
+                    summary: "Pool matches award 3 points for a win, 1 point for a draw, and 0 points for a loss. No bonus points.",
                     author: "Match Commissioner"
                 },
                 {
@@ -1517,24 +1517,22 @@
                     if (hScore > aScore) {
                         homeRow.won += 1;
                         awayRow.lost += 1;
-                        homeRow.pts += 4;
-                        if ((hScore - aScore) <= 7) awayRow.bp += 1;
+                        homeRow.pts += 3;
                     } else if (aScore > hScore) {
                         awayRow.won += 1;
                         homeRow.lost += 1;
-                        awayRow.pts += 4;
-                        if ((aScore - hScore) <= 7) homeRow.bp += 1;
+                        awayRow.pts += 3;
                     } else {
                         homeRow.drawn += 1;
                         awayRow.drawn += 1;
-                        homeRow.pts += 2;
-                        awayRow.pts += 2;
+                        homeRow.pts += 1;
+                        awayRow.pts += 1;
                     }
                 });
 
                 return Object.values(table).map(row => {
                     row.pd = row.pf - row.pa;
-                    row.pts += row.bp;
+                    row.bp = 0;
                     return row;
                 }).sort((a, b) => b.pts - a.pts || b.pd - a.pd || b.pf - a.pf || a.team.name.localeCompare(b.team.name));
             },
@@ -2179,7 +2177,7 @@
                         venue: t.venue_name || "Padang Ragbi ADTEC Shah Alam",
                         organizer: existing.organizer || "Kemuning Rugby Club",
                         description: t.description || "",
-                        rulesSummary: existing.rulesSummary || "World Rugby 10-a-side Variations • Win: 4 pts, Draw: 2 pts, Loss: 0 pts.",
+                        rulesSummary: existing.rulesSummary || "KEMUNING 10s Points System • Win: 3 pts, Draw: 1 pt, Loss: 0 pts. No bonus points.",
                         categories: existing.categories || [],
                         badgeColor: colors[idx % colors.length]
                     };
@@ -4909,7 +4907,7 @@
                                     <th class="p-3.5 text-center">P</th><th class="p-3.5 text-center">W</th>
                                     <th class="p-3.5 text-center">D</th><th class="p-3.5 text-center">L</th>
                                     <th class="p-3.5 text-center">PF</th><th class="p-3.5 text-center">PA</th>
-                                    <th class="p-3.5 text-center">PD</th><th class="p-3.5 text-center">BP</th>
+                                    <th class="p-3.5 text-center">PD</th>
                                     <th class="p-3.5 text-center">PTS</th>
                                 </tr></thead>
                                 <tbody>
@@ -4924,7 +4922,6 @@
                                             <td class="p-3.5 text-center">${r.pf}</td>
                                             <td class="p-3.5 text-center">${r.pa}</td>
                                             <td class="p-3.5 text-center font-mono text-xs">${r.pd >= 0 ? '+' + r.pd : r.pd}</td>
-                                            <td class="p-3.5 text-center text-pitch-400 font-semibold">${r.bp}</td>
                                             <td class="p-3.5 text-center font-sport text-xl font-bold text-gold-400">${r.pts}</td>
                                         </tr>
                                     `).join("")}
