@@ -666,6 +666,7 @@
             selectedMatchId: null,
             selectedCategoryFilter: "ALL",
             timerInterval: null,
+            realtimeChannel: null,
             matches: [],
 
             // Verified KEMUNING 10s category UUIDs
@@ -735,6 +736,86 @@
                         this.updateLiveClockDisplays();
                     }
                 }, 1000);
+            },
+
+            clockElapsedFromRow(row) {
+                const base = Math.max(0, Number(row?.elapsed_seconds) || 0);
+                if (!row?.timer_running || !row?.updated_at) return base;
+                const updated = new Date(row.updated_at).getTime();
+                if (!Number.isFinite(updated)) return base;
+                return base + Math.max(0, Math.floor((Date.now() - updated) / 1000));
+            },
+
+            applyClockRow(row, rerender = true) {
+                if (!row?.match_id) return;
+                const match = this.matches.find(m => m.id === row.match_id);
+                if (!match) return;
+                match.elapsedSeconds = this.clockElapsedFromRow(row);
+                match.period = row.period || match.period || "FIRST_HALF";
+                match.timerRunning = Boolean(row.timer_running) && !["HALF_TIME", "FULL_TIME"].includes(match.period);
+                match.clockUpdatedAt = row.updated_at || null;
+                this.updateLiveClockDisplays();
+                if (rerender && document.querySelector(`[data-live-clock="${row.match_id}"]`)) {
+                    // Update only existing live-clock displays; do not rebuild the page on every tick.
+                    this.updateLiveClockDisplays();
+                }
+            },
+
+            async persistClockState(match, silent = true) {
+                if (!SupabaseConfig.client || !match?.id) return false;
+                const { data, error } = await SupabaseConfig.client.rpc("save_match_clock_state", {
+                    p_match_id: match.id,
+                    p_elapsed_seconds: Math.max(0, Number(match.elapsedSeconds) || 0),
+                    p_period: match.period || "FIRST_HALF",
+                    p_timer_running: Boolean(match.timerRunning)
+                });
+                if (error) {
+                    console.error("Match clock RPC error:", error);
+                    if (!silent) UI.toast("Gagal menyimpan jam: " + error.message, "error");
+                    return false;
+                }
+                match.clockUpdatedAt = data?.updated_at || new Date().toISOString();
+                return true;
+            },
+
+            subscribeRealtime() {
+                const db = SupabaseConfig.client;
+                if (!db || this.realtimeChannel) return;
+                this.realtimeChannel = db.channel("kemuning-live-match-updates")
+                    .on("postgres_changes", { event: "*", schema: "public", table: "match_clock_states" }, payload => {
+                        if (payload.new) this.applyClockRow(payload.new, false);
+                    })
+                    .on("postgres_changes", { event: "*", schema: "public", table: "match_results" }, payload => {
+                        const row = payload.new;
+                        if (!row?.match_id) return;
+                        const match = this.matches.find(m => m.id === row.match_id);
+                        if (!match) return;
+                        const home = this.parseStrictScore(row.home_score);
+                        const away = this.parseStrictScore(row.away_score);
+                        if (home !== null) match.homeScore = home;
+                        if (away !== null) match.awayScore = away;
+                        match.officialConfirmed = String(row.status || "").toLowerCase() === "official";
+                        if (match.officialConfirmed) {
+                            match.status = "FINAL";
+                            match.period = "FULL_TIME";
+                            match.timerRunning = false;
+                        }
+                        App.renderCurrentPage();
+                    })
+                    .on("postgres_changes", { event: "*", schema: "public", table: "matches" }, payload => {
+                        const row = payload.new;
+                        if (!row?.id) return;
+                        const match = this.matches.find(m => m.id === row.id);
+                        if (!match) return;
+                        const states = { scheduled: "SCHEDULED", upcoming: "SCHEDULED", live: "LIVE", in_progress: "LIVE", half_time: "LIVE", full_time: "FINAL", completed: "FINAL", cancelled: "CANCELLED" };
+                        match.status = states[String(row.status || "").toLowerCase()] || match.status;
+                        if (match.status === "FINAL") {
+                            match.period = "FULL_TIME";
+                            match.timerRunning = false;
+                        }
+                        App.renderCurrentPage();
+                    })
+                    .subscribe(status => console.info("KEMUNING Realtime:", status));
             },
 
             formatClock(totalSeconds) {
@@ -926,6 +1007,11 @@
                 // Official results must be published through the secure database RPC.
                 // Do not write official status directly from the browser.
                 if (match.officialConfirmed) {
+                    const clockSaved = await this.persistClockState(match, true);
+                    if (!clockSaved) {
+                        if (!options.silent) UI.toast("Jam perlawanan gagal disimpan. Keputusan belum diterbitkan.", "error");
+                        return false;
+                    }
                     const { error: officialRpcError } = await db.rpc(
                         "confirm_match_result_official",
                         {
@@ -974,6 +1060,9 @@
                     UI.toast("Gagal menyimpan skor draf: " + draftRpcError.message, "error");
                     return false;
                 }
+
+                const clockSaved = await this.persistClockState(match, options.silent === true);
+                if (!clockSaved) return false;
 
                 if (!options.silent) {
                     AuthManager.logAudit(`Draft Score Saved via RPC: Match ${match.matchNo} (${match.homeScore}-${match.awayScore}, ${dbStatus})`);
@@ -2222,6 +2311,12 @@
                     : { data: [], error: null };
                 if (resultQ.error) throw resultQ.error;
 
+                const clockQ = matches.length
+                    ? await db.from("match_clock_states").select("match_id, elapsed_seconds, period, timer_running, updated_at").in("match_id", matches.map(m => m.id))
+                    : { data: [], error: null };
+                if (clockQ.error) throw clockQ.error;
+                const clocksByMatch = Object.fromEntries((clockQ.data || []).map(r => [r.match_id, r]));
+
                 const resultsByMatch = Object.fromEntries((resultQ.data || []).map(r => [r.match_id, r]));
                 const categoryById = Object.fromEntries(categories.map(c => [c.id, c]));
                 const poolByTeam = Object.fromEntries(poolRows.map(r => [r.team_id, r.pool_name]));
@@ -2325,11 +2420,12 @@
                         kickoff: local.kickoff || "TBD",
                         date: local.date || tournament.start_date || "",
                         status: mappedStatus,
-                        period: periodMap[normalizedDbStatus] || "FIRST_HALF",
-                        elapsedSeconds: 0,
+                        period: clocksByMatch[m.id]?.period || periodMap[normalizedDbStatus] || "FIRST_HALF",
+                        elapsedSeconds: clocksByMatch[m.id] ? MatchEngine.clockElapsedFromRow(clocksByMatch[m.id]) : 0,
                         matchDurationMinutes: totalMatchMinutes,
                         halfDurationSeconds: halfMinutes * 60,
-                        timerRunning: false,
+                        timerRunning: clocksByMatch[m.id] ? Boolean(clocksByMatch[m.id].timer_running) : false,
+                        clockUpdatedAt: clocksByMatch[m.id]?.updated_at || null,
                         homeTeamId: m.home_team_id,
                         awayTeamId: m.away_team_id,
                         homeLabel: m.home_label || "",
@@ -4514,7 +4610,7 @@
                                                 ${t.short}
                                             </div>
                                             <div>
-                                                <h3 class="font-bold text-white text-base">${t.name}</h3>
+                                                <button type="button" onclick="App.openTeamProfile('${t.id}')" class="font-bold text-white text-base text-left hover:text-pitch-400 focus:text-pitch-400 focus:outline-none focus:underline transition" aria-label="View ${t.name} team profile">${t.name} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-70"></i></button>
                                                 <div class="text-xs text-slate-400"><span class="text-pitch-400 font-semibold">${t.pool}</span> • ${t.category}</div>
                                             </div>
                                         </div>
@@ -5245,6 +5341,7 @@
                     }
                 }
                 MatchEngine.startGlobalTicker();
+                if (connected) MatchEngine.subscribeRealtime();
                 this.updateHeaderAuth();
 
                 const initialHash = window.location.hash.replace("#", "");
@@ -5326,6 +5423,52 @@
                         </button>
                     `;
                 }
+            },
+
+            openTeamProfile(teamId) {
+                const team = TournamentStore.teams.find(t => String(t.id) === String(teamId));
+                if (!team) {
+                    UI.toast("Maklumat pasukan tidak ditemui.", "warning");
+                    return;
+                }
+
+                const esc = value => String(value ?? "-").replace(/[&<>\"']/g, ch => ({
+                    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+                }[ch]));
+                const players = TournamentStore.players.filter(p =>
+                    p.edition === team.edition && String(p.teamId || "") === String(team.id)
+                );
+                const teamMatches = MatchEngine.matches.filter(m =>
+                    m.edition === team.edition &&
+                    (String(m.homeTeamId || "") === String(team.id) || String(m.awayTeamId || "") === String(team.id))
+                ).sort((a, b) => Number(a.matchNumberRaw || 999) - Number(b.matchNumberRaw || 999));
+
+                const rosterHtml = players.length ? players.map(p => `
+                    <div class="flex items-center justify-between gap-3 py-2 border-b border-slate-200 last:border-0">
+                        <div class="min-w-0"><div class="font-semibold text-[#102C50]">${esc(p.name)}</div><div class="text-xs text-slate-500">${esc(p.position || "Utility")}</div></div>
+                        <span class="shrink-0 rounded-lg bg-sky-50 text-sky-700 px-2.5 py-1 text-xs font-bold">#${esc(p.number ?? "-")}</span>
+                    </div>`).join("") : `<p class="text-sm text-slate-500 py-3">Tiada rekod pemain ditemui untuk pasukan ini.</p>`;
+
+                const matchesHtml = teamMatches.length ? teamMatches.map(m => {
+                    const isHome = String(m.homeTeamId || "") === String(team.id);
+                    const opponent = isHome ? (m.awayLabel || TournamentStore.teams.find(x => String(x.id) === String(m.awayTeamId))?.name || "TBD") : (m.homeLabel || TournamentStore.teams.find(x => String(x.id) === String(m.homeTeamId))?.name || "TBD");
+                    const score = m.status === "SCHEDULED" ? "Belum bermula" : `${Number(m.homeScore) || 0} - ${Number(m.awayScore) || 0}`;
+                    return `<div class="flex items-center justify-between gap-3 py-2 border-b border-slate-200 last:border-0"><div class="min-w-0"><div class="font-semibold text-[#102C50]">${esc(m.matchNo)} <span class="font-normal text-slate-500">vs</span> ${esc(opponent)}</div><div class="text-xs text-slate-500">${esc(m.stage || m.category || "Match")}</div></div><span class="shrink-0 text-xs font-bold text-sky-700">${esc(score)}</span></div>`;
+                }).join("") : `<p class="text-sm text-slate-500 py-3">Tiada rekod perlawanan untuk pasukan ini.</p>`;
+
+                UI.showModal(
+                    `Profil Pasukan — ${team.name}`,
+                    `<div class="space-y-5">
+                        <div class="flex items-center gap-3 rounded-xl bg-sky-50 border border-sky-100 p-4">
+                            <div class="w-14 h-14 rounded-xl flex items-center justify-center text-white font-bold text-lg shadow" style="background:${esc(team.color || "#299DD5")}">${esc(team.short || team.name.slice(0,3))}</div>
+                            <div class="min-w-0"><div class="font-bold text-lg text-[#102C50]">${esc(team.name)}</div><div class="text-xs text-slate-600">${esc(team.category)} • ${esc(team.pool)}</div></div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3"><div class="rounded-xl bg-slate-50 p-3"><div class="text-xs text-slate-500">Team Manager</div><div class="font-semibold text-[#102C50] mt-1">${esc(team.coach || "-")}</div></div><div class="rounded-xl bg-slate-50 p-3"><div class="text-xs text-slate-500">Jumlah Pemain</div><div class="font-semibold text-[#102C50] mt-1">${players.length}</div></div></div>
+                        <section><h4 class="font-bold text-[#102C50] mb-1">Senarai Pemain</h4><div class="max-h-52 overflow-y-auto">${rosterHtml}</div></section>
+                        <section><h4 class="font-bold text-[#102C50] mb-1">Rekod Perlawanan</h4><div class="max-h-52 overflow-y-auto">${matchesHtml}</div></section>
+                    </div>`,
+                    [{ label: "Tutup", style: "secondary", onClick: () => UI.closeModal() }]
+                );
             },
 
             async navigate(page) {
